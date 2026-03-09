@@ -1,0 +1,96 @@
+:root {
+  font-family: system-ui, Avenir, Helvetica, Arial, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+
+  /* 主题变量 - 默认白底黑字 */
+  --bg: #ffffff;
+  --text: #111111;
+  --text-muted: #666666;
+  --surface: #f9f9f9;
+  --border: #dddddd;
+  --primary: #1890ff;
+  --primary-hover: #40a9ff;
+  --link: #1967d2;
+  --link-hover: #1557b0;
+  --error: #ff4d4f;
+  --success: #52c41a;
+  --button-bg: #1a1a1a;
+  --button-text: #ffffff;
+
+  /* 若需切换为黑底白字，请取消以下注释并注释掉上方变量 */
+  /*
+  --bg: #121212;
+  --text: #f0f0f0;
+  --text-muted: #b0b0b0;
+  --surface: #1e1e1e;
+  --border: #333333;
+  --primary: #177ddc;
+  --primary-hover: #177ddc;
+  --link: #177ddc;
+  --link-hover: #177ddc;
+  --button-bg: #333333;
+  --button-text: #f0f0f0;
+  */
+
+  color: var(--text);
+  background-color: var(--bg);
+
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+a {
+  font-weight: 500;
+  color: var(--link);
+  text-decoration: inherit;
+}
+a:hover {
+  color: var(--link-hover);
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  color: var(--text);
+  background-color: var(--bg);
+}
+
+#root {
+  min-height: 100vh;
+  width: 100%;
+}
+
+h1 {
+  font-size: 3.2em;
+  line-height: 1.1;
+  color: var(--text);
+}
+
+button {
+  border-radius: 8px;
+  border: 1px solid transparent;
+  padding: 0.6em 1.2em;
+  font-size: 1em;
+  font-weight: 500;
+  font-family: inherit;
+  background-color: var(--button-bg);
+  color: var(--button-text);
+  cursor: pointer;
+  transition: border-color 0.25s;
+}
+button:hover {
+  border-color: var(--primary);
+}
+button:focus,
+button:focus-visible {
+  outline: 4px auto -webkit-focus-ring-color;
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
