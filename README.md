@@ -22,6 +22,11 @@ AI 招聘面试系统基础框架。
 2. 安装依赖: `npm install`
 3. 启动开发服务器: `npm run dev`
 
+## 注意事项
+
+- **数据库与上传文件**：本地开发的 SQLite 数据库（`*.db`）及候选人上传的音视频文件（`backend/app/static/uploads/`）已被加入 `.gitignore`，不会提交到 Git 仓库。请勿手动将这些文件 push 到远程。
+- **环境变量**：敏感信息请配置在 `backend/.env` 中。
+
 ## 核心流程
 
 1. **创建面试**: 调用 `POST /api/interviews/create` 获取 `link_token`。
