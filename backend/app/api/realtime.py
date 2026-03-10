@@ -16,7 +16,7 @@ import secrets
 
 router = APIRouter()
 
-OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01"
+OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-mini-realtime-preview"
 
 def pcm16_to_wav(pcm_data: bytes, sample_rate: int = 16000, channels: int = 1) -> bytes:
     """
@@ -68,9 +68,18 @@ async def realtime_interview_endpoint(websocket: WebSocket, token: str, db: Sess
 5. 整个过程请使用中文。
 """,
                     "voice": "alloy",
+                    "modalities": ["text", "audio"],
                     "input_audio_format": "pcm16",
                     "output_audio_format": "pcm16",
-                    "turn_detection": {"type": "server_vad"},
+                    "input_audio_transcription": {
+                        "model": "whisper-1"
+                    },
+                    "turn_detection": {
+                        "type": "server_vad",
+                        "threshold": 0.5,
+                        "prefix_padding_ms": 300,
+                        "silence_duration_ms": 600
+                    },
                 }
             }
             await openai_ws.send(json.dumps(init_event))
@@ -124,26 +133,41 @@ async def realtime_interview_endpoint(websocket: WebSocket, token: str, db: Sess
                 try:
                     async for message in openai_ws:
                         event = json.loads(message)
+                        event_type = event.get("type")
+                        
+                        # Log ALL events for deep debugging
+                        # We exclude deltas from being logged as full JSON to avoid flooding.
+                        if event_type in ["response.audio.delta", "response.audio_transcript.delta", "response.text.delta"]:
+                            pass
+                        else:
+                            logger.info(f"OpenAI Event: {event_type} - {json.dumps(event)}")
                         
                         # 1. Handle Audio/Text Deltas for UI
-                        if event["type"] in ["response.audio.delta", "response.text.delta", "response.audio_transcript.delta"]:
+                        if event_type in ["response.audio.delta", "response.text.delta", "response.audio_transcript.delta"]:
                             await websocket.send_text(json.dumps(event))
-                            if event["type"] == "response.audio_transcript.delta":
-                                last_transcript += event["delta"]
+                            if event_type == "response.audio_transcript.delta":
+                                last_transcript += event.get("delta", "")
                         
                         # 2. Handle Errors
-                        elif event["type"] == "error":
-                            logger.error(f"OpenAI Realtime Error for token {token}: {event.get('error')}")
+                        elif event_type == "error":
+                            logger.error(f"OpenAI Realtime Error for token {token}: {json.dumps(event, indent=2)}")
                         
                         # 3. Handle VAD Events for precise recording
-                        elif event["type"] == "input_audio_buffer.speech_started":
+                        elif event_type == "input_audio_buffer.speech_started":
                             logger.info(f"VAD: Speech started for question {current_question_index}")
                             is_recording_segment = True
                             audio_buffer.clear() # Start fresh for this segment
                             
-                        elif event["type"] == "input_audio_buffer.speech_stopped":
+                        elif event_type == "input_audio_buffer.speech_stopped":
                             logger.info(f"VAD: Speech stopped for question {current_question_index}")
                             is_recording_segment = False
+                            
+                            # Automatically commit and create response on speech stopped (Voice Agent behavior)
+                            # Note: In server_vad mode with create_response=true, OpenAI will automatically
+                            # commit the buffer and create a response. We don't need to manually send these.
+                            # await openai_ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
+                            # await openai_ws.send(json.dumps({"type": "response.create"}))
+
                             # Capture user's input
                             if audio_buffer:
                                 pcm_data = b"".join(audio_buffer)
@@ -167,12 +191,19 @@ async def realtime_interview_endpoint(websocket: WebSocket, token: str, db: Sess
                                 
                                 audio_buffer.clear()
                         
-                        elif event["type"] == "response.done":
+                        elif event_type == "response.done":
                             logger.info(f"OpenAI: Response done. Transcript: {last_transcript}")
                             # Only increment question index if AI actually said something substantial
                             if len(last_transcript.strip()) > 5:
                                 current_question_index += 1
                             last_transcript = ""
+                            
+                        # Forward other useful events to client
+                        elif event_type in ["response.created", "response.completed", "conversation.item.created", "session.updated", "session.created"]:
+                            await websocket.send_text(json.dumps(event))
+                            
+                except Exception as e:
+                    logger.error(f"OpenAI to Client relay error for token {token}: {e}")
                             
                 except Exception as e:
                     logger.error(f"OpenAI to Client relay error for token {token}: {e}")

@@ -92,10 +92,17 @@ const InterviewPage: React.FC = () => {
         const data = json_parse_safe(event.data);
         if (!data) return;
 
+        console.log('WebSocket Event:', data.type, data);
+
         if (data.type === 'response.audio.delta') {
           enqueueAudio(data.audio);
         } else if (data.type === 'response.audio_transcript.delta') {
           setTranscript(prev => prev + data.delta);
+        } else if (data.type === 'response.created') {
+          // Clear transcript for new response
+          setTranscript('');
+        } else if (data.type === 'error') {
+          console.error('Realtime Error:', data.error);
         }
       };
 
@@ -114,12 +121,9 @@ const InterviewPage: React.FC = () => {
           const rms = Math.sqrt(sum / inputData.length);
           setVolume(rms); // Update volume for visualization
           
-          // Increased threshold from 0.01 to 0.03 to filter environment noise better
-          if (rms > 0.03) {
-            const pcm16 = floatTo16BitPCM(inputData);
-            const base64Audio = arrayBufferToBase64(pcm16);
-            ws.send(JSON.stringify({ type: 'audio', audio: base64Audio }));
-          }
+          const pcm16 = floatTo16BitPCM(inputData);
+          const base64Audio = arrayBufferToBase64(pcm16);
+          ws.send(JSON.stringify({ type: 'audio', audio: base64Audio }));
         }
       };
 
