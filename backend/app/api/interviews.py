@@ -61,14 +61,12 @@ async def submit_answer(
     with open(file_path, "wb") as buffer:
         buffer.write(await audio_file.read())
     
-    # STT (Placeholder)
-    transcript = await transcribe_audio(file_path)
-    
+    # Defer STT to complete stage
     db_answer = Answer(
         interview_id=interview.id,
         question_index=question_index,
-        audio_url=file_path,  # In production, this might be a URL to S3
-        transcript=transcript
+        audio_url=file_path,  # Store path
+        transcript=None  # To be filled in complete_interview
     )
     db.add(db_answer)
     
@@ -88,8 +86,26 @@ async def complete_interview(token: str, db: Session = Depends(get_db)):
     
     answers = db.query(Answer).filter(Answer.interview_id == interview.id).all()
     
-    # LLM Evaluation (Placeholder)
-    answers_data = [{"question_index": a.question_index, "transcript": a.transcript} for a in answers]
+    # 1. Perform STT for each answer if not already done
+    for answer in answers:
+        if not answer.transcript and os.path.exists(answer.audio_url):
+            answer.transcript = await transcribe_audio(answer.audio_url)
+    
+    db.commit() # Save transcripts
+    
+    # 2. LLM Evaluation on all transcripts
+    # Map question_text from question_set
+    question_map = {q['order_index']: q['question_text'] for q in interview.question_set}
+    
+    answers_data = [
+        {
+            "question_index": a.question_index, 
+            "question_text": question_map.get(a.question_index, "未知问题"),
+            "transcript": a.transcript or ""
+        } 
+        for a in answers
+    ]
+    
     evaluation = await evaluate_interview(answers_data)
     
     interview.status = InterviewStatus.FINISHED

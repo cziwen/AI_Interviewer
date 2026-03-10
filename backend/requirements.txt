@@ -1,5 +1,6 @@
 fastapi
 openai
+websockets
 uvicorn
 sqlalchemy
 psycopg2-binary

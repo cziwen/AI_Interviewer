@@ -9,6 +9,12 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24  # 24 hours
     UPLOAD_DIR: str = os.getenv("UPLOAD_DIR", "./app/static/uploads")
     
+    # Question Bank Configuration
+    QUESTION_BANK_CSV_PATH: str = os.getenv("QUESTION_BANK_CSV_PATH", "app/static/question_bank.csv")
+    # JSON string mapping CSV columns to position/level etc. 
+    # Example: '{"position": "岗位", "category": "类别"}'
+    QUESTION_BANK_FIELD_MAP: str = os.getenv("QUESTION_BANK_FIELD_MAP", '{"position": "岗位"}')
+    
     ADMIN_USERNAME: str = os.getenv("ADMIN_USERNAME", "admin")
     ADMIN_PASSWORD: str = os.getenv("ADMIN_PASSWORD", "admin123")
 

@@ -30,7 +30,7 @@ export const submitAnswer = async (
 };
 
 export const completeInterview = async (token: string): Promise<any> => {
-  const response = await api.post(`/interviews/complete/${token}`);
+  const response = await api.post(`/interviews/${token}/complete`);
   return response.data;
 };
 
