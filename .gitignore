@@ -158,3 +158,10 @@ Thumbs.db
 # Database
 *.db
 *.sqlite
+*.sqlite3
+*.sql
+*.dump
+*.backup
+
+# Media / Uploads
+backend/app/static/uploads/
