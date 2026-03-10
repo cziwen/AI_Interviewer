@@ -2,6 +2,7 @@ from pydantic_settings import BaseSettings
 import os
 
 class Settings(BaseSettings):
+    OPENAI_API_KEY: str | None = None
     DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///./ai_interview.db")
     JWT_SECRET: str = os.getenv("JWT_SECRET", "your-secret-key-change-it-in-production")
     ALGORITHM: str = "HS256"
