@@ -18,7 +18,7 @@ router = APIRouter()
 
 OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-mini-realtime-preview"
 
-def pcm16_to_wav(pcm_data: bytes, sample_rate: int = 16000, channels: int = 1) -> bytes:
+def pcm16_to_wav(pcm_data: bytes, sample_rate: int = 24000, channels: int = 1) -> bytes:
     """
     将原始 PCM16 数据封装为 WAV 格式。
     """
@@ -69,8 +69,8 @@ async def realtime_interview_endpoint(websocket: WebSocket, token: str, db: Sess
 """,
                     "voice": "alloy",
                     "modalities": ["text", "audio"],
-                    "input_audio_format": "pcm16",
-                    "output_audio_format": "pcm16",
+                    "input_audio_format": "pcm16",  # PCM16 is always 24kHz in OpenAI Realtime
+                    "output_audio_format": "pcm16",  # PCM16 is always 24kHz in OpenAI Realtime
                     "input_audio_transcription": {
                         "model": "whisper-1"
                     },
@@ -144,7 +144,24 @@ async def realtime_interview_endpoint(websocket: WebSocket, token: str, db: Sess
                         
                         # 1. Handle Audio/Text Deltas for UI
                         if event_type in ["response.audio.delta", "response.text.delta", "response.audio_transcript.delta"]:
-                            await websocket.send_text(json.dumps(event))
+                            # Fix: For response.audio.delta, the audio data is in 'delta' field, not 'audio'
+                            if event_type == "response.audio.delta":
+                                # OpenAI sends audio in the 'delta' field for response.audio.delta
+                                if "delta" in event:
+                                    # Create a modified event with 'audio' field for frontend compatibility
+                                    modified_event = event.copy()
+                                    modified_event["audio"] = event["delta"]  # Move delta to audio field
+                                    await websocket.send_text(json.dumps(modified_event))
+
+                                    # Log for debugging
+                                    audio_preview = event["delta"][:50] if event.get("delta") else "EMPTY"
+                                    logger.debug(f"response.audio.delta forwarded, audio preview: {audio_preview}...")
+                                else:
+                                    logger.warning(f"response.audio.delta missing 'delta' field: {list(event.keys())}")
+                                    await websocket.send_text(json.dumps(event))
+                            else:
+                                await websocket.send_text(json.dumps(event))
+
                             if event_type == "response.audio_transcript.delta":
                                 last_transcript += event.get("delta", "")
                         

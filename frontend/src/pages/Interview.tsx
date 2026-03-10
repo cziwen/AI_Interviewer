@@ -120,7 +120,8 @@ const InterviewPage: React.FC = () => {
       streamRef.current = stream;
       console.log('[MIC] Stream acquired:', stream.id, 'active:', stream.active);
       
-      const audioContext = new AudioContext({ sampleRate: 16000 });
+      // OpenAI Realtime PCM16 requires 24kHz for both input and output
+      const audioContext = new AudioContext({ sampleRate: 24000 });
       audioContextRef.current = audioContext;
       
       // Proactively resume AudioContext on user click
@@ -438,7 +439,8 @@ const InterviewPage: React.FC = () => {
       float32[0]
     );
 
-    const audioBuffer = audioContextRef.current.createBuffer(1, float32.length, 16000);
+    // OpenAI Realtime PCM16 is always 24kHz
+    const audioBuffer = audioContextRef.current.createBuffer(1, float32.length, 24000);
     audioBuffer.getChannelData(0).set(float32);
     
     const source = audioContextRef.current.createBufferSource();
