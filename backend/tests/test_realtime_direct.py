@@ -16,7 +16,7 @@ def load_env_manually(path):
 load_env_manually("../.env")
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01"
+OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-mini"
 
 async def test_realtime():
     if not OPENAI_API_KEY:

@@ -1,39 +1,187 @@
-# AI Interviewer
+# AI 面试系统
 
-AI 招聘面试系统基础框架。
+基于 OpenAI Realtime API 的智能语音面试系统，提供实时对话、智能追问、多维度评估等企业级招聘解决方案。
 
-## 项目结构
+## ✨ 核心特性
 
-- `backend/`: FastAPI 后端
-- `frontend/`: React 前端
+- 🎙️ **实时语音交互**：基于 OpenAI Realtime API，低延迟（<2s）的自然对话体验
+- 🤖 **智能面试流程**：自动化提问、追问、节奏控制，模拟真人面试官
+- 📊 **岗位题库管理**：支持 CSV 题库导入和 JSON JD 配置，灵活匹配不同岗位
+- 📈 **多维度评估**：面试结束后自动生成结构化评分报告
+- 🎧 **设备适配优化**：麦克风/扬声器选择及实时音量测试
+- 🔇 **半双工策略**：智能音频门控，消除回声和自我反馈
 
-## 核心升级：OpenAI Realtime 实时语音面试
+## 🏗️ 项目结构
 
-系统已升级为基于 **OpenAI Realtime API** 的实时语音对话模式。
+```
+AI_Interviewer/
+├── backend/           # FastAPI 后端服务
+│   ├── app/
+│   │   ├── api/       # API 路由（interviews, realtime, job_profiles, admin）
+│   │   ├── models/    # 数据库模型（Interview, Answer, JobProfile）
+│   │   ├── services/  # 业务逻辑（STT, 评估, 题目生成）
+│   │   └── utils/     # 工具类（日志等）
+│   └── requirements.txt
+├── frontend/          # React + TypeScript 前端
+│   ├── src/
+│   │   ├── pages/     # 页面组件（Interview, Admin, Done）
+│   │   └── api.ts     # API 调用封装
+│   └── package.json
+└── spec_doc/          # 📚 完整技术文档
+```
 
-### 升级特性
-- **实时对话**：AI 面试官实时发问、追问，候选人语音流式回答，低延迟交互。
-- **动态题库**：支持从 `backend/app/static/question_bank.csv` 按岗位匹配题目。
-- **智能评估**：面试结束后自动进行全场 STT 转写与 LLM 综合评分。
+## 🚀 快速启动
 
-## 快速启动
+### 1. 环境准备
 
-### 后端启动
+**前置要求**：
+- Node.js 16+
+- Python 3.9+
+- OpenAI API Key（支持 Realtime API）
 
-1. 进入 backend 目录: `cd backend`
-2. 安装依赖: `pip install -r requirements.txt`
-3. 配置环境变量: 创建 `.env` 文件并填入 `OPENAI_API_KEY`
-4. 启动服务: `uvicorn app.main:app --reload`
+**克隆项目**：
+```bash
+git clone <repository-url>
+cd AI_Interviewer
+```
 
-### 前端启动
+### 2. 后端启动
 
-1. 进入 frontend 目录: `cd frontend`
-2. 安装依赖: `npm install`
-3. 启动开发服务器: `npm run dev`
+```bash
+cd backend
 
-## 核心流程
+# 安装依赖
+pip install -r requirements.txt
 
-1. **创建面试**: 调用 `POST /api/interviews/create` (可指定 `position`)。
-2. **候选人面试**: 访问 `http://localhost:5173/interview/{link_token}`，点击“开始面试”进入实时通话。
-3. **完成与评分**: 面试结束后点击“结束面试”，后端将自动生成 STT 转写与评分。
-4. **HR 后台**: 访问 `http://localhost:5173/admin/login` 查看结果。
+# 配置环境变量
+cat > .env << EOF
+OPENAI_API_KEY=your_openai_api_key_here
+DATABASE_URL=sqlite:///./interview.db
+EOF
+
+# 启动服务（默认 http://localhost:8000）
+uvicorn app.main:app --reload
+```
+
+### 3. 前端启动
+
+```bash
+cd frontend
+
+# 安装依赖
+npm install
+
+# 启动开发服务器（默认 http://localhost:5173）
+npm run dev
+```
+
+### 4. 访问系统
+
+- **候选人面试页**：`http://localhost:5173/interview/{token}` （由 HR 创建后分享）
+- **HR 管理后台**：`http://localhost:5173/admin/login`
+- **API 文档**：`http://localhost:8000/docs`
+
+## 📖 使用流程
+
+### HR 创建面试
+
+```bash
+curl -X POST http://localhost:8000/api/interviews/create \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "张三",
+    "position": "后端工程师",
+    "position_key": "backend_engineer",
+    "external_id": "candidate_001",
+    "resume_brief": "5年 Python 开发经验"
+  }'
+
+# 返回：{ "link_token": "abc123...", ... }
+```
+
+### 候选人参加面试
+
+1. 访问面试链接：`http://localhost:5173/interview/abc123...`
+2. 选择麦克风和扬声器，点击"测试设备"
+3. 点击"确认设备并开始面试"
+4. 与 AI 面试官进行实时语音对话
+5. 完成后点击"结束面试并生成评分"
+
+### HR 查看结果
+
+1. 登录管理后台：`http://localhost:5173/admin/login`
+2. 查看面试列表和详细评分报告
+
+## 🎯 岗位配置管理
+
+系统支持通过 **JobProfile** 配置不同岗位的题库和 JD：
+
+```bash
+# 上传岗位配置（CSV 题库 + JSON JD）
+curl -X POST http://localhost:8000/api/job-profiles/upload \
+  -F "position_key=backend_engineer" \
+  -F "position_name=后端工程师" \
+  -F "csv_file=@questions.csv" \
+  -F "jd_file=@jd.json"
+```
+
+**CSV 格式示例**（`questions.csv`）：
+```csv
+question,reference
+请介绍一下 Python 的 GIL,全局解释器锁的概念和影响
+如何设计一个高并发系统？,考察负载均衡、缓存、数据库优化
+```
+
+**JD 格式示例**（`jd.json`）：
+```json
+{
+  "responsibilities": "负责后端服务开发和优化",
+  "requirements": "精通 Python，熟悉 Django/FastAPI",
+  "main_question_count": 3,
+  "followup_limit_per_question": 1,
+  "expected_duration_minutes": 10
+}
+```
+
+详见：[spec_doc/03_features/03.5_job_profile_config.md](spec_doc/03_features/03.5_job_profile_config.md)
+
+## 📚 完整文档
+
+详细技术文档请查看 [spec_doc/README.md](spec_doc/README.md)：
+
+- [快速开始指南](spec_doc/01_quick_start.md)
+- [系统架构设计](spec_doc/02_architecture.md)
+- [功能模块详解](spec_doc/03_features/)
+- [技术实现细节](spec_doc/04_technical_details/)
+- [故障排查指南](spec_doc/06_troubleshooting.md)
+
+## 🛠️ 技术栈
+
+| 类别 | 技术 |
+|-----|------|
+| **前端** | React 18, TypeScript, Web Audio API |
+| **后端** | FastAPI, SQLAlchemy, WebSocket |
+| **AI 服务** | OpenAI Realtime API (gpt-4o-realtime-mini) |
+| **音频处理** | PCM16 @ 24kHz, Server VAD, ScriptProcessorNode |
+| **数据库** | PostgreSQL / SQLite |
+
+## 🔧 核心技术亮点
+
+1. **OpenAI Realtime API 集成**：全流程 WebSocket 通信，支持音频流式传输
+2. **Server VAD 机制**：利用 OpenAI 服务端语音检测，精确定位说话起止
+3. **半双工音频策略**：基于时间轴的智能门控，防止 AI 声音被麦克风采集
+4. **动态节奏控制**：根据预设时长自动调整提问节奏，支持超时自然收尾
+5. **设备适配优化**：支持音频设备选择和实时音量可视化
+
+## 📝 版本历史
+
+- **v2.0** (2026-03) - Realtime API 升级版，实时语音交互
+- **v1.0** (2025-12) - 基础版本，录音上传模式
+
+## 🤝 贡献指南
+
+欢迎提交 Issue 和 Pull Request！
+
+## 📄 许可证
+
+MIT License

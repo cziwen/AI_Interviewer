@@ -18,7 +18,7 @@ import time
 
 router = APIRouter()
 
-OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-mini-realtime-preview"
+OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-mini"
 
 def pcm16_to_wav(pcm_data: bytes, sample_rate: int = 24000, channels: int = 1) -> bytes:
     """
@@ -170,7 +170,7 @@ async def realtime_interview_endpoint(websocket: WebSocket, token: str, db: Sess
 
             # Relay tasks
             async def relay_client_to_openai():
-                nonlocal current_question_index
+                nonlocal current_question_index, main_questions_asked, followups_used_for_current, current_stage, overtime_mode, overtime_closing_sent, candidate_speaking
                 try:
                     async for message in websocket.iter_text():
                         data = json.loads(message)
@@ -196,7 +196,7 @@ async def realtime_interview_endpoint(websocket: WebSocket, token: str, db: Sess
                     logger.error(f"Client to OpenAI relay error for token {token}: {e}")
 
             async def relay_openai_to_client():
-                nonlocal current_question_index, is_recording_segment, last_transcript
+                nonlocal current_question_index, is_recording_segment, last_transcript, main_questions_asked, followups_used_for_current, current_stage, overtime_mode, overtime_closing_sent, candidate_speaking
                 try:
                     async for message in openai_ws:
                         event = json.loads(message)
