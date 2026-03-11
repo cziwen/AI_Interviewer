@@ -1,0 +1,9 @@
+{
+    "position_name": "Agent算法工程师（电商场景）",
+    "main_question_count": 3,
+    "followup_limit_per_question": 1,
+    "expected_duration_minutes": 10,
+    "responsibilities": "1）在电商复杂业务场景下设计与落地多智能体（Agent）系统，用于智能客服、商家智能运营、内容生成、采购寻源等；2）基于大模型和工具调用构建平台级 Agent 能力，支持运营、技术和业务多角色提效；3）抽象和沉淀电商领域可复用的 Agent 架构、组件与评估体系，持续优化体验与业务指标。",
+    "requirements": "1）计算机/软件工程/人工智能相关专业，本科及以上学历；2）熟练掌握 Python/Java/Go/C++ 中至少一门，有扎实的数据结构与算法基础；3）具备 Agent 系统开发经验，熟悉 LangChain、LlamaIndex、AutoGen 等框架原理及工程实践；4）掌握 Prompt 工程、RAG、Tool Calling、Context Engineering 等关键技术，有在真实业务中应用和调优的经历；5）能够进行多种工具与系统集成，了解 OpenAPI、RPC、MCP 等协议与实现方案；6）了解主流深度学习框架（PyTorch/TensorFlow），有 Transformer 等模型实战经验更佳；7）具备问题/价值驱动的思维方式、优秀的抽象与解决问题能力，愿意在不确定中探索并快速迭代。",
+    "plus": "1）有数据工程、特征工程经验，能串联端到端数据闭环；2）有大模型微调/指令对齐/后训练经验，熟悉模型评测与对齐方法；3）在 AIGC、Agent、检索增强等方向有开源项目或论文；4）对电商业务有深入理解，在推荐/搜索/广告/客服等任一方向有落地项目经验。"
+  }

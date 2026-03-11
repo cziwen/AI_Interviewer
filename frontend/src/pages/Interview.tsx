@@ -49,6 +49,10 @@ const InterviewPage: React.FC = () => {
   const [isTestingMic, setIsTestingMic] = useState(false);
   const [isTestingSpeaker, setIsTestingSpeaker] = useState(false);
 
+  // Agent speaking state for half-duplex strategy
+  const [isAgentSpeaking, setIsAgentSpeaking] = useState(false);
+  const isAgentSpeakingRef = useRef(false);
+
   const wsRef = useRef<WebSocket | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const processorRef = useRef<ScriptProcessorNode | null>(null);
@@ -196,6 +200,13 @@ const InterviewPage: React.FC = () => {
           );
           setTranscript(prev => prev + delta);
         } else if (data.type === 'response.created') {
+          // Preemptively set speaking flag when a new response starts by advancing nextStartTime
+          if (audioContextRef.current) {
+            // Pre-lock for 1.5 seconds to cover initial processing/first chunk arrival
+            nextStartTimeRef.current = Math.max(nextStartTimeRef.current, audioContextRef.current.currentTime + 1.5);
+            console.log('[TTS] Pre-locking mic for 1.5s on response.created');
+          }
+
           // Clear transcript for new response
           setTranscript('');
           ttsChunkCountRef.current = 0;
@@ -219,7 +230,7 @@ const InterviewPage: React.FC = () => {
 
       let frameCount = 0;
       processor.onaudioprocess = (e) => {
-        if (ws.readyState === WebSocket.OPEN) {
+        if (ws.readyState === WebSocket.OPEN && audioContextRef.current) {
           const inputData = e.inputBuffer.getChannelData(0);
           
           // Simple RMS volume check to filter out silence
@@ -229,11 +240,28 @@ const InterviewPage: React.FC = () => {
           }
           const rms = Math.sqrt(sum / inputData.length);
           setVolume(rms); // Update volume for visualization
+          
+          const now = audioContextRef.current.currentTime;
+          // Strategy A: Time-based gating. 
+          // Block if current time is before scheduled audio ends + 0.2s safety buffer
+          const isActuallySpeaking = now < (nextStartTimeRef.current + 0.2);
+          
+          // Update state only on change to avoid re-renders
+          if (isActuallySpeaking !== isAgentSpeakingRef.current) {
+            isAgentSpeakingRef.current = isActuallySpeaking;
+            setIsAgentSpeaking(isActuallySpeaking);
+          }
+
           frameCount += 1;
           if (frameCount % 30 === 0) {
-            console.log('[MIC] onaudioprocess rms =', rms, 'frame =', frameCount);
+            console.log('[MIC] onaudioprocess rms =', rms, 'frame =', frameCount, 'isAgentSpeaking =', isActuallySpeaking, 'now =', now, 'nextStart =', nextStartTimeRef.current);
           }
           
+          // Skip sending audio if the agent is speaking
+          if (isActuallySpeaking) {
+            return;
+          }
+
           const pcm16 = floatTo16BitPCM(inputData);
           const base64Audio = arrayBufferToBase64(pcm16);
           ws.send(JSON.stringify({ type: 'audio', audio: base64Audio }));
@@ -510,7 +538,10 @@ const InterviewPage: React.FC = () => {
       audioContextRef.current = null;
     }
 
-    // 5. Reset states
+    isAgentSpeakingRef.current = false;
+    setIsAgentSpeaking(false);
+
+    // 6. Reset states
     setVolume(0);
     setStatus('idle');
   };
@@ -660,6 +691,11 @@ const InterviewPage: React.FC = () => {
               </div>
 
               <p>正在通话中...</p>
+              {isAgentSpeaking && (
+                <p style={{ color: '#007bff', fontSize: '0.9rem', fontWeight: 'bold' }}>
+                  AI 正在发言，请稍后再回答...
+                </p>
+              )}
               <div style={{ marginTop: '20px', fontStyle: 'italic', color: '#666', maxHeight: '100px', overflowY: 'auto' }}>
                 {transcript || "等待 AI 发言..."}
               </div>

@@ -34,8 +34,38 @@ export const completeInterview = async (token: string): Promise<any> => {
   return response.data;
 };
 
-export const createInterview = async (data?: { name?: string; position?: string; resume_brief?: string }): Promise<Interview> => {
+export const createInterview = async (data?: { 
+  name?: string; 
+  position?: string; 
+  position_key?: string;
+  resume_brief?: string 
+}): Promise<Interview> => {
   const response = await api.post('/interviews/create', data ?? {});
+  return response.data;
+};
+
+export const uploadJobProfile = async (data: {
+  position_key: string;
+  position_name?: string;
+  jd_file: File;
+  question_csv: File;
+}): Promise<any> => {
+  const formData = new FormData();
+  formData.append('position_key', data.position_key);
+  if (data.position_name) formData.append('position_name', data.position_name);
+  formData.append('jd_file', data.jd_file);
+  formData.append('question_csv', data.question_csv);
+
+  const response = await api.post('/job_profiles/', formData, {
+    headers: {
+      'Content-Type': 'multipart/form-data',
+    },
+  });
+  return response.data;
+};
+
+export const getJobProfiles = async (): Promise<any[]> => {
+  const response = await api.get('/job_profiles/');
   return response.data;
 };
 

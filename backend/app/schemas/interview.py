@@ -9,6 +9,7 @@ class Question(BaseModel):
 class InterviewCreate(BaseModel):
     name: Optional[str] = None
     position: Optional[str] = None
+    position_key: Optional[str] = None  # New field to link to JobProfile
     external_id: Optional[str] = None
     resume_brief: Optional[str] = None
 

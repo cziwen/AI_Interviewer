@@ -2,11 +2,13 @@ from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from sqlalchemy.orm import Session
 import secrets
 import os
+import random
 from datetime import datetime
 from typing import List
 
 from ..database import get_db
 from ..models.interview import Interview, InterviewStatus
+from ..models.job_profile import JobProfile
 from ..models.answer import Answer
 from ..schemas.interview import InterviewCreate, InterviewResponse, AnswerResponse
 from ..services.question_generator import generate_questions
@@ -19,11 +21,38 @@ router = APIRouter()
 @router.post("/create", response_model=InterviewResponse)
 def create_interview(interview_in: InterviewCreate, db: Session = Depends(get_db)):
     link_token = secrets.token_urlsafe(32)
-    questions = generate_questions(interview_in.position, interview_in.resume_brief)
+    
+    position = interview_in.position
+    questions = []
+    
+    # Check if position_key is provided to use JobProfile
+    if interview_in.position_key:
+        job_profile = db.query(JobProfile).filter(JobProfile.position_key == interview_in.position_key).first()
+        if not job_profile:
+            raise HTTPException(status_code=400, detail=f"Job profile with position_key '{interview_in.position_key}' not found")
+        
+        position = job_profile.position_name or position
+        
+        # Determine how many questions to pick from JD (default to 3)
+        main_question_count = job_profile.jd_data.get('main_question_count', 3)
+        
+        # Randomly sample questions from the bank
+        bank = job_profile.question_bank
+        sample_size = min(main_question_count, len(bank))
+        sampled = random.sample(bank, sample_size)
+        
+        # Re-index for this interview
+        questions = [
+            {"order_index": i + 1, "question_text": q["question_text"], "reference": q.get("reference")}
+            for i, q in enumerate(sampled)
+        ]
+    else:
+        # Fallback to automatic generation
+        questions = generate_questions(position, interview_in.resume_brief)
     
     db_interview = Interview(
         name=interview_in.name,
-        position=interview_in.position,
+        position=position,
         external_id=interview_in.external_id,
         resume_brief=interview_in.resume_brief,
         link_token=link_token,

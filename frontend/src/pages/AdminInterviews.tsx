@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import axios from 'axios';
 import { Link } from 'react-router-dom';
-import { createInterview } from '../api';
+import { createInterview, getJobProfiles, uploadJobProfile } from '../api';
 
 interface InterviewSummary {
   id: number;
@@ -12,13 +12,32 @@ interface InterviewSummary {
   total_score: number | null;
 }
 
+interface JobProfileSummary {
+  position_key: string;
+  position_name: string;
+}
+
 const AdminInterviews: React.FC = () => {
   const [interviews, setInterviews] = useState<InterviewSummary[]>([]);
+  const [jobProfiles, setJobProfiles] = useState<JobProfileSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
-  const [newInterview, setNewInterview] = useState({ name: '', position: '', resume_brief: '' });
+  const [showJobModal, setShowJobModal] = useState(false);
+  const [newInterview, setNewInterview] = useState({ name: '', position_key: '', resume_brief: '' });
+  const [newJob, setNewJob] = useState<{
+    position_key: string;
+    position_name: string;
+    jd_file: File | null;
+    question_csv: File | null;
+  }>({
+    position_key: '',
+    position_name: '',
+    jd_file: null,
+    question_csv: null,
+  });
   const [createdLink, setCreatedLink] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [jobSubmitting, setJobSubmitting] = useState(false);
 
   const fetchInterviews = () => {
     const token = localStorage.getItem('admin_token');
@@ -29,11 +48,25 @@ const AdminInterviews: React.FC = () => {
     .finally(() => setLoading(false));
   };
 
+  const fetchJobProfiles = async () => {
+    try {
+      const data = await getJobProfiles();
+      setJobProfiles(data);
+    } catch (err) {
+      console.error('Failed to fetch job profiles:', err);
+    }
+  };
+
   useEffect(() => {
     fetchInterviews();
+    fetchJobProfiles();
   }, []);
 
   const handleCreate = async () => {
+    if (!newInterview.position_key) {
+      alert('请选择岗位');
+      return;
+    }
     setSubmitting(true);
     try {
       const res = await createInterview(newInterview);
@@ -44,6 +77,30 @@ const AdminInterviews: React.FC = () => {
       alert('创建失败，请重试');
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const handleJobUpload = async () => {
+    if (!newJob.position_key || !newJob.jd_file || !newJob.question_csv) {
+      alert('请填写岗位 Key 并上传 JD JSON 和 题库 CSV');
+      return;
+    }
+    setJobSubmitting(true);
+    try {
+      await uploadJobProfile({
+        position_key: newJob.position_key,
+        position_name: newJob.position_name,
+        jd_file: newJob.jd_file,
+        question_csv: newJob.question_csv,
+      });
+      alert('岗位创建成功');
+      setShowJobModal(false);
+      setNewJob({ position_key: '', position_name: '', jd_file: null, question_csv: null });
+      fetchJobProfiles();
+    } catch (err) {
+      alert('上传失败，请检查文件格式');
+    } finally {
+      setJobSubmitting(false);
     }
   };
 
@@ -78,19 +135,34 @@ const AdminInterviews: React.FC = () => {
     <div style={{ padding: '20px', color: 'var(--text)' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
         <h2 style={{ color: 'var(--text)', margin: 0 }}>面试列表</h2>
-        <button 
-          onClick={() => setShowModal(true)}
-          style={{
-            padding: '10px 20px',
-            backgroundColor: '#1890ff',
-            color: 'white',
-            border: 'none',
-            borderRadius: '4px',
-            cursor: 'pointer'
-          }}
-        >
-          创建面试
-        </button>
+        <div style={{ display: 'flex', gap: '10px' }}>
+          <button 
+            onClick={() => setShowJobModal(true)}
+            style={{
+              padding: '10px 20px',
+              backgroundColor: '#52c41a',
+              color: 'white',
+              border: 'none',
+              borderRadius: '4px',
+              cursor: 'pointer'
+            }}
+          >
+            岗位管理
+          </button>
+          <button 
+            onClick={() => setShowModal(true)}
+            style={{
+              padding: '10px 20px',
+              backgroundColor: '#1890ff',
+              color: 'white',
+              border: 'none',
+              borderRadius: '4px',
+              cursor: 'pointer'
+            }}
+          >
+            创建面试
+          </button>
+        </div>
       </div>
 
       <table style={{ width: '100%', borderCollapse: 'collapse' }}>
@@ -171,13 +243,18 @@ const AdminInterviews: React.FC = () => {
                 </div>
                 <div style={{ marginBottom: '15px' }}>
                   <label style={{ display: 'block', marginBottom: '5px' }}>申请岗位</label>
-                  <input 
-                    type="text" 
-                    value={newInterview.position}
-                    onChange={e => setNewInterview({...newInterview, position: e.target.value})}
+                  <select 
+                    value={newInterview.position_key}
+                    onChange={e => setNewInterview({...newInterview, position_key: e.target.value})}
                     style={{ width: '100%', padding: '8px', boxSizing: 'border-box' }}
-                    placeholder="可选"
-                  />
+                  >
+                    <option value="">请选择岗位</option>
+                    {jobProfiles.map(jp => (
+                      <option key={jp.position_key} value={jp.position_key}>
+                        {jp.position_name || jp.position_key}
+                      </option>
+                    ))}
+                  </select>
                 </div>
                 <div style={{ marginBottom: '20px' }}>
                   <label style={{ display: 'block', marginBottom: '5px' }}>简历摘要/背景</label>
@@ -228,6 +305,90 @@ const AdminInterviews: React.FC = () => {
                 </div>
               </>
             )}
+          </div>
+        </div>
+      )}
+
+      {showJobModal && (
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: 'rgba(0,0,0,0.5)',
+          display: 'flex',
+          justifyContent: 'center',
+          alignItems: 'center',
+          zIndex: 1000
+        }}>
+          <div style={{
+            backgroundColor: '#fff',
+            padding: '30px',
+            borderRadius: '8px',
+            width: '450px',
+            boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
+            color: '#333'
+          }}>
+            <h3 style={{ marginTop: 0 }}>岗位管理 - 创建新岗位</h3>
+            <div style={{ marginBottom: '15px' }}>
+              <label style={{ display: 'block', marginBottom: '5px' }}>岗位 Key (唯一标识)</label>
+              <input 
+                type="text" 
+                value={newJob.position_key}
+                onChange={e => setNewJob({...newJob, position_key: e.target.value})}
+                style={{ width: '100%', padding: '8px', boxSizing: 'border-box' }}
+                placeholder="如: backend_engineer"
+              />
+            </div>
+            <div style={{ marginBottom: '15px' }}>
+              <label style={{ display: 'block', marginBottom: '5px' }}>岗位名称 (展示用)</label>
+              <input 
+                type="text" 
+                value={newJob.position_name}
+                onChange={e => setNewJob({...newJob, position_name: e.target.value})}
+                style={{ width: '100%', padding: '8px', boxSizing: 'border-box' }}
+                placeholder="如: 高级后端工程师"
+              />
+            </div>
+            <div style={{ marginBottom: '15px' }}>
+              <label style={{ display: 'block', marginBottom: '5px' }}>JD JSON 文件</label>
+              <input 
+                type="file" 
+                accept=".json"
+                onChange={e => setNewJob({...newJob, jd_file: e.target.files?.[0] || null})}
+                style={{ width: '100%', padding: '8px', boxSizing: 'border-box' }}
+              />
+              <small style={{ color: '#666' }}>包含 main_question_count, expected_duration_minutes 等</small>
+            </div>
+            <div style={{ marginBottom: '20px' }}>
+              <label style={{ display: 'block', marginBottom: '5px' }}>题库 CSV 文件</label>
+              <input 
+                type="file" 
+                accept=".csv"
+                onChange={e => setNewJob({...newJob, question_csv: e.target.files?.[0] || null})}
+                style={{ width: '100%', padding: '8px', boxSizing: 'border-box' }}
+              />
+              <small style={{ color: '#666' }}>包含 question, reference 两列</small>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px' }}>
+              <button onClick={() => setShowJobModal(false)} style={{ padding: '8px 16px', cursor: 'pointer' }}>取消</button>
+              <button 
+                onClick={handleJobUpload} 
+                disabled={jobSubmitting}
+                style={{ 
+                  padding: '8px 16px', 
+                  backgroundColor: '#52c41a', 
+                  color: 'white', 
+                  border: 'none', 
+                  borderRadius: '4px',
+                  cursor: jobSubmitting ? 'not-allowed' : 'pointer',
+                  opacity: jobSubmitting ? 0.7 : 1
+                }}
+              >
+                {jobSubmitting ? '上传中...' : '上传并创建'}
+              </button>
+            </div>
           </div>
         </div>
       )}
