@@ -18,7 +18,10 @@ import time
 
 router = APIRouter()
 
-OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-mini"
+OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime?model=gpt-realtime-mini"
+
+# 候选人长时间未回答时，等待多少秒后由 AI 重新提问或提醒
+NO_RESPONSE_REASK_SECONDS = 18
 
 def pcm16_to_wav(pcm_data: bytes, sample_rate: int = 24000, channels: int = 1) -> bytes:
     """
@@ -118,7 +121,8 @@ async def realtime_interview_endpoint(websocket: WebSocket, token: str, db: Sess
    - 请根据提供的“参考方向/要点”和“岗位背景信息”来判断候选人的回答是否完整。
    - 如果回答明显不完整或遗漏关键点，且时间允许，请使用简短的话语提示引导候选人补充。
 7. **被打断处理**：如果候选人在你确认回答完整前提到新话题，先简短回应，然后提醒“我们先把刚才那个问题说完”。
-8. **语气与语言**：语气要专业、礼貌且富有同理心。整个过程请使用中文。
+8. **长时间未回答**：若你收到系统提示“候选人尚未回答”，请简短重复当前问题或礼貌提醒候选人作答（例如：“您可以先简单说说想法，不必紧张。”），不要换题。
+9. **语气与语言**：语气要专业、礼貌且富有同理心。整个过程请使用中文。
 
 题目列表与参考方向：
 {questions_str}
@@ -134,7 +138,8 @@ async def realtime_interview_endpoint(websocket: WebSocket, token: str, db: Sess
                         "type": "server_vad",
                         "threshold": 0.5,
                         "prefix_padding_ms": 300,
-                        "silence_duration_ms": 600
+                        # 600ms 在真实语音里偏激进，容易把短停顿误判为结束并抢话
+                        "silence_duration_ms": 1200
                     },
                 }
             }
@@ -192,6 +197,18 @@ async def realtime_interview_endpoint(websocket: WebSocket, token: str, db: Sess
                             logger.info(f"Client manually ended turn for question {current_question_index}")
                             await openai_ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
                             await openai_ws.send(json.dumps({"type": "response.create"}))
+                        elif data.get("type") == "no_response_timeout":
+                            if current_stage in ("intro", "qa", "candidate_q") and not overtime_mode and not candidate_speaking:
+                                reask_event = {
+                                    "type": "response.create",
+                                    "response": {
+                                        "instructions": "候选人尚未回答。请简短重复当前问题或礼貌提醒候选人作答（例如：您可以先简单说说想法。），不要换题。"
+                                    }
+                                }
+                                await openai_ws.send(json.dumps(reask_event))
+                                logger.info(
+                                    f"Frontend no-response timeout ({NO_RESPONSE_REASK_SECONDS}s) triggered re-ask for token {token}"
+                                )
                 except Exception as e:
                     logger.error(f"Client to OpenAI relay error for token {token}: {e}")
 

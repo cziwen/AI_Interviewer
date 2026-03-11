@@ -50,7 +50,7 @@
 
 - **前端**：React + TypeScript + Web Audio API
 - **后端**：FastAPI + SQLAlchemy + WebSocket
-- **AI 服务**：OpenAI Realtime API (gpt-4o-realtime-mini)
+- **AI 服务**：OpenAI Realtime API (gpt-realtime-mini)
 - **数据库**：PostgreSQL / SQLite
 - **音频格式**：PCM16 @ 24kHz
 

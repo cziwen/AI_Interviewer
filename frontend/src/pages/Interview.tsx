@@ -3,6 +3,9 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { getInterview, completeInterview } from '../api';
 import type { Interview } from '../types';
 
+const NO_RESPONSE_REASK_MS = 18000;
+const USER_SPEECH_RMS_THRESHOLD = 0.015;
+
 const VolumeBar: React.FC<{ level: number; isActive: boolean }> = ({ level, isActive }) => {
   if (!isActive) return null;
   
@@ -67,6 +70,29 @@ const InterviewPage: React.FC = () => {
   const nextStartTimeRef = useRef<number>(0);
   const ttsChunkCountRef = useRef<number>(0);
   const transcriptLengthRef = useRef<number>(0);
+  const noResponseTimerRef = useRef<number | null>(null);
+  const userSpeechActiveRef = useRef<boolean>(false);
+
+  const clearNoResponseTimer = () => {
+    if (noResponseTimerRef.current !== null) {
+      window.clearTimeout(noResponseTimerRef.current);
+      noResponseTimerRef.current = null;
+    }
+  };
+
+  const armNoResponseTimer = () => {
+    const ws = wsRef.current;
+    clearNoResponseTimer();
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+    noResponseTimerRef.current = window.setTimeout(() => {
+      const liveWs = wsRef.current;
+      if (!liveWs || liveWs.readyState !== WebSocket.OPEN) return;
+      if (isAgentSpeakingRef.current) return;
+      if (userSpeechActiveRef.current) return;
+      liveWs.send(JSON.stringify({ type: 'no_response_timeout' }));
+    }, NO_RESPONSE_REASK_MS);
+  };
 
   useEffect(() => {
     if (token) {
@@ -244,12 +270,23 @@ const InterviewPage: React.FC = () => {
           const now = audioContextRef.current.currentTime;
           // Strategy A: Time-based gating. 
           // Block if current time is before scheduled audio ends + 0.2s safety buffer
-          const isActuallySpeaking = now < (nextStartTimeRef.current + 0.2);
+          const isActuallySpeaking = now < (nextStartTimeRef.current + 0.1);
           
           // Update state only on change to avoid re-renders
           if (isActuallySpeaking !== isAgentSpeakingRef.current) {
+            const wasSpeaking = isAgentSpeakingRef.current;
             isAgentSpeakingRef.current = isActuallySpeaking;
             setIsAgentSpeaking(isActuallySpeaking);
+            
+            if (isActuallySpeaking) {
+              // AI started speaking
+              userSpeechActiveRef.current = false;
+              clearNoResponseTimer();
+            } else if (wasSpeaking) {
+              // AI finished speaking - this is the human-centric start point
+              console.log('[TIMER] AI finished speaking, arming no-response timer');
+              armNoResponseTimer();
+            }
           }
 
           frameCount += 1;
@@ -260,6 +297,19 @@ const InterviewPage: React.FC = () => {
           // Skip sending audio if the agent is speaking
           if (isActuallySpeaking) {
             return;
+          }
+
+          // Frontend-side no-response detection:
+          // - user speech start: cancel timer
+          // - user speech end: re-arm timer
+          const isUserSpeaking = rms > USER_SPEECH_RMS_THRESHOLD;
+          if (isUserSpeaking !== userSpeechActiveRef.current) {
+            userSpeechActiveRef.current = isUserSpeaking;
+            if (isUserSpeaking) {
+              clearNoResponseTimer();
+            } else {
+              armNoResponseTimer();
+            }
           }
 
           const pcm16 = floatTo16BitPCM(inputData);
@@ -507,6 +557,9 @@ const InterviewPage: React.FC = () => {
   };
 
   const cleanupInterview = () => {
+    clearNoResponseTimer();
+    userSpeechActiveRef.current = false;
+
     // 1. Close WebSocket
     if (wsRef.current) {
       wsRef.current.onclose = null;

@@ -161,7 +161,7 @@ question,reference
 |-----|------|
 | **前端** | React 18, TypeScript, Web Audio API |
 | **后端** | FastAPI, SQLAlchemy, WebSocket |
-| **AI 服务** | OpenAI Realtime API (gpt-4o-realtime-mini) |
+| **AI 服务** | OpenAI Realtime API (gpt-realtime-mini) |
 | **音频处理** | PCM16 @ 24kHz, Server VAD, ScriptProcessorNode |
 | **数据库** | PostgreSQL / SQLite |
 
