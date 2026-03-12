@@ -22,6 +22,7 @@
 - [04.2_audio_processing.md](04_technical_details/04.2_audio_processing.md) - 音频处理技术
 - [04.3_vad_mechanism.md](04_technical_details/04.3_vad_mechanism.md) - VAD 语音检测机制
 - [04.4_half_duplex_strategy.md](04_technical_details/04.4_half_duplex_strategy.md) - 半双工音频策略
+- [04.5_realtime_turn_orchestrator_refactor.md](04_technical_details/04.5_realtime_turn_orchestrator_refactor.md) - Realtime Turn 编排重构规范
 
 ### 运维与调试
 - [05_logging.md](05_logging.md) - 日志系统

@@ -13,11 +13,10 @@ class Settings(BaseSettings):
     STT_MODEL: str = os.getenv("STT_MODEL", "gpt-4o-mini-transcribe")
     EVAL_LLM_MODEL: str = os.getenv("EVAL_LLM_MODEL", "gpt-4o-mini")
     
-    # Question Bank Configuration
-    QUESTION_BANK_CSV_PATH: str = os.getenv("QUESTION_BANK_CSV_PATH", "app/static/question_bank.csv")
-    # JSON string mapping CSV columns to position/level etc. 
-    # Example: '{"position": "岗位", "category": "类别"}'
-    QUESTION_BANK_FIELD_MAP: str = os.getenv("QUESTION_BANK_FIELD_MAP", '{"position": "岗位"}')
+    # Realtime Interview Settings
+    REALTIME_MODEL: str = os.getenv("REALTIME_MODEL", "gpt-realtime-mini")
+    REALTIME_STRICT_PROMPT_ENABLED: bool = os.getenv("REALTIME_STRICT_PROMPT_ENABLED", "true").lower() == "true"
+    REALTIME_CONTEXT_RESET_MODE: str = os.getenv("REALTIME_CONTEXT_RESET_MODE", "per_main_question") # none, per_main_question
     
     ADMIN_USERNAME: str = os.getenv("ADMIN_USERNAME", "admin")
     ADMIN_PASSWORD: str = os.getenv("ADMIN_PASSWORD", "admin123")

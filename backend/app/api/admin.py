@@ -6,6 +6,7 @@ from typing import List
 from ..database import get_db
 from ..models.admin_user import AdminUser
 from ..models.interview import Interview
+from ..models.answer import Answer
 from ..schemas.admin import AdminLogin, Token, InterviewSummary
 from ..services.auth import verify_password, create_access_token, get_password_hash
 from ..config import settings
@@ -67,11 +68,24 @@ def get_interview_detail(interview_id: int, db: Session = Depends(get_db)):
     interview = db.query(Interview).filter(Interview.id == interview_id).first()
     if not interview:
         raise HTTPException(status_code=404, detail="Interview not found")
-    
-    from ..models.answer import Answer
+
     answers = db.query(Answer).filter(Answer.interview_id == interview.id).all()
-    
+
     return {
         "interview": interview,
         "answers": answers
     }
+
+
+@router.delete("/interviews/{interview_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_interview(interview_id: int, db: Session = Depends(get_db)):
+    interview = db.query(Interview).filter(Interview.id == interview_id).first()
+    if not interview:
+        raise HTTPException(status_code=404, detail="Interview not found")
+
+    # Delete all related answers first to avoid orphans
+    db.query(Answer).filter(Answer.interview_id == interview.id).delete()
+    db.delete(interview)
+    db.commit()
+
+    return None
