@@ -21,6 +21,13 @@ const AdminInterviewDetail: React.FC = () => {
   if (!data) return <div style={{ padding: '20px', color: 'var(--text)' }}>未找到面试详情</div>;
 
   const { interview, answers } = data;
+  const sortedAnswers = [...(answers || [])].sort((a: any, b: any) => {
+    const aKey = a.created_at || a.id || 0;
+    const bKey = b.created_at || b.id || 0;
+    if (aKey === bKey) return 0;
+    return aKey > bKey ? 1 : -1;
+  });
+  const introAnswers = sortedAnswers.filter((a: any) => a.question_index === 0);
 
   return (
     <div style={{ padding: '20px', maxWidth: '800px', margin: '0 auto', color: 'var(--text)' }}>
@@ -59,15 +66,44 @@ const AdminInterviewDetail: React.FC = () => {
       </div>
 
       <h3 style={{ color: 'var(--text)' }}>问答记录</h3>
+      {introAnswers.length > 0 && (
+        <div style={{ marginBottom: '20px', borderLeft: '4px solid #6c757d', paddingLeft: '15px' }}>
+          <p><strong>自我介绍</strong></p>
+          <p>
+            <strong>回答:</strong>{" "}
+            {introAnswers
+              .map((a: any) => a.transcript)
+              .filter((t: string) => Boolean(t))
+              .join(' ')
+              || '未回答'}
+          </p>
+          {introAnswers
+            .filter((a: any) => a.audio_url)
+            .map((a: any, idx: number) => (
+              <p key={`intro-audio-${idx}`}>
+                <small style={{ color: 'var(--text-muted)' }}>音频文件: {a.audio_url}</small>
+              </p>
+            ))}
+        </div>
+      )}
       {interview.question_set.map((q: any, idx: number) => {
-        const answer = answers.find((a: any) => a.question_index === idx);
+        const orderIndex = q.order_index ?? (idx + 1);
+        const matchedAnswers = sortedAnswers.filter((a: any) => a.question_index === orderIndex);
+        const mergedTranscript = matchedAnswers
+          .map((a: any) => a.transcript)
+          .filter((t: string) => Boolean(t))
+          .join(' ');
         return (
           <div key={idx} style={{ marginBottom: '20px', borderLeft: '4px solid var(--primary)', paddingLeft: '15px' }}>
-            <p><strong>Q{idx + 1}: {q.question_text}</strong></p>
-            <p><strong>回答:</strong> {answer?.transcript || '未回答'}</p>
-            {answer?.audio_url && (
-              <p><small style={{ color: 'var(--text-muted)' }}>音频文件: {answer.audio_url}</small></p>
-            )}
+            <p><strong>Q{orderIndex}: {q.question_text}</strong></p>
+            <p><strong>回答:</strong> {mergedTranscript || '未回答'}</p>
+            {matchedAnswers
+              .filter((a: any) => a.audio_url)
+              .map((a: any, audioIdx: number) => (
+                <p key={`q-${orderIndex}-audio-${audioIdx}`}>
+                  <small style={{ color: 'var(--text-muted)' }}>音频文件: {a.audio_url}</small>
+                </p>
+              ))}
           </div>
         );
       })}

@@ -38,6 +38,9 @@ const InterviewPage: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<'idle' | 'connecting' | 'connected' | 'error'>('idle');
   const [transcript, setTranscript] = useState<string>('');
+  const [isFinishing, setIsFinishing] = useState(false);
+  const [countdown, setCountdown] = useState<number | null>(null);
+  const [elapsedTime, setElapsedTime] = useState<number>(0);
   
   // Device selection states
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
@@ -72,6 +75,7 @@ const InterviewPage: React.FC = () => {
   const transcriptLengthRef = useRef<number>(0);
   const noResponseTimerRef = useRef<number | null>(null);
   const userSpeechActiveRef = useRef<boolean>(false);
+  const timerIntervalRef = useRef<number | null>(null);
 
   const clearNoResponseTimer = () => {
     if (noResponseTimerRef.current !== null) {
@@ -180,6 +184,13 @@ const InterviewPage: React.FC = () => {
       ws.onopen = async () => {
         setStatus('connected');
         console.log('[TTS] ws.onopen, AudioContext state =', audioContext.state);
+        
+        // Start interview timer
+        setElapsedTime(0);
+        timerIntervalRef.current = window.setInterval(() => {
+          setElapsedTime(prev => prev + 1);
+        }, 1000);
+
         try {
           if (audioContext.state === 'suspended') {
             console.log('[TTS] AudioContext is suspended on open, calling resume()');
@@ -238,6 +249,25 @@ const InterviewPage: React.FC = () => {
           ttsChunkCountRef.current = 0;
           transcriptLengthRef.current = 0;
           console.log('[TTS] New response.created, reset audio chunk counter');
+        } else if (data.type === 'interview.natural_end') {
+          console.log('[WS] Interview natural end received');
+          // Start 15s countdown
+          setCountdown(15);
+          const timer = setInterval(() => {
+            setCountdown(prev => {
+              console.log('[COUNTDOWN] Current:', prev);
+              if (prev === null || prev <= 1) {
+                clearInterval(timer);
+                if (prev === 1) {
+                  console.log('[COUNTDOWN] Reached 1, triggering handleFinish');
+                  // Trigger automatic finish
+                  handleFinish();
+                }
+                return 0;
+              }
+              return prev - 1;
+            });
+          }, 1000);
         } else if (data.type === 'error') {
           console.error('Realtime Error:', data.error);
         }
@@ -544,20 +574,30 @@ const InterviewPage: React.FC = () => {
   };
 
   const handleFinish = async () => {
-    if (!token) return;
+    if (!token || isFinishing) return;
     
+    console.log('[FINISH] Starting finish process for token:', token);
+    setIsFinishing(true);
     cleanupInterview();
 
     try {
+      console.log('[FINISH] Calling completeInterview API...');
       await completeInterview(token);
+      console.log('[FINISH] API call successful, navigating to done page...');
       navigate(`/interview/${token}/done`);
     } catch (err) {
+      console.error('[FINISH] Failed to complete interview:', err);
       setError('完成面试失败，请重试');
+      setIsFinishing(false);
     }
   };
 
   const cleanupInterview = () => {
     clearNoResponseTimer();
+    if (timerIntervalRef.current) {
+      window.clearInterval(timerIntervalRef.current);
+      timerIntervalRef.current = null;
+    }
     userSpeechActiveRef.current = false;
 
     // 1. Close WebSocket
@@ -612,9 +652,29 @@ const InterviewPage: React.FC = () => {
   const microphones = devices.filter(d => d.kind === 'audioinput');
   const speakers = devices.filter(d => d.kind === 'audiooutput');
 
+  const formatTime = (seconds: number) => {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  };
+
   return (
     <div style={{ padding: '20px', maxWidth: '800px', margin: '40px auto', textAlign: 'center' }}>
-      <h1>AI 实时语音面试</h1>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
+        <h1 style={{ margin: 0 }}>AI 实时语音面试</h1>
+        {status === 'connected' && (
+          <div style={{ 
+            padding: '5px 15px', 
+            backgroundColor: '#e9ecef', 
+            borderRadius: '20px', 
+            fontWeight: 'bold',
+            color: '#495057',
+            fontSize: '1.1rem'
+          }}>
+            ⏱️ {formatTime(elapsedTime)}
+          </div>
+        )}
+      </div>
       <p>岗位: {interview?.position}</p>
       
       {showDeviceSelection ? (
@@ -748,6 +808,21 @@ const InterviewPage: React.FC = () => {
                 <p style={{ color: '#007bff', fontSize: '0.9rem', fontWeight: 'bold' }}>
                   AI 正在发言，请稍后再回答...
                 </p>
+              )}
+              {countdown !== null && (
+                <div style={{ 
+                  marginTop: '10px', 
+                  padding: '10px', 
+                  backgroundColor: '#fff3cd', 
+                  color: '#856404', 
+                  borderRadius: '8px',
+                  border: '1px solid #ffeeba'
+                }}>
+                  <p style={{ margin: 0, fontWeight: 'bold' }}>面试已结束</p>
+                  <p style={{ margin: '5px 0 0', fontSize: '0.9rem' }}>
+                    您可以手动点击下方按钮结束，或等待 {countdown} 秒后自动提交。
+                  </p>
+                </div>
               )}
               <div style={{ marginTop: '20px', fontStyle: 'italic', color: '#666', maxHeight: '100px', overflowY: 'auto' }}>
                 {transcript || "等待 AI 发言..."}

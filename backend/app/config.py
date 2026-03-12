@@ -9,6 +9,10 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24  # 24 hours
     UPLOAD_DIR: str = os.getenv("UPLOAD_DIR", "./app/static/uploads")
     
+    # Models for background tasks
+    STT_MODEL: str = os.getenv("STT_MODEL", "gpt-4o-mini-transcribe")
+    EVAL_LLM_MODEL: str = os.getenv("EVAL_LLM_MODEL", "gpt-4o-mini")
+    
     # Question Bank Configuration
     QUESTION_BANK_CSV_PATH: str = os.getenv("QUESTION_BANK_CSV_PATH", "app/static/question_bank.csv")
     # JSON string mapping CSV columns to position/level etc. 

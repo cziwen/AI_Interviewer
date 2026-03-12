@@ -57,6 +57,8 @@ pip install -r requirements.txt
 cat > .env << EOF
 OPENAI_API_KEY=your_openai_api_key_here
 DATABASE_URL=sqlite:///./interview.db
+STT_MODEL=gpt-4o-mini-transcribe
+EVAL_LLM_MODEL=gpt-4o-mini
 EOF
 
 # 启动服务（默认 http://localhost:8000）

@@ -38,7 +38,7 @@ async def evaluate_interview(answers: List[Dict[str, Any]]) -> Dict[str, Any]:
 
     try:
         response = await client.chat.completions.create(
-            model="gpt-4o",
+            model=settings.EVAL_LLM_MODEL,
             messages=[
                 {"role": "system", "content": "你是一名专业的面试评估专家。"},
                 {"role": "user", "content": prompt}

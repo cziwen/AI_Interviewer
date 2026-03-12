@@ -13,7 +13,7 @@ async def transcribe_audio(audio_file_path: str) -> str:
     try:
         with open(audio_file_path, "rb") as audio_file:
             transcript = await client.audio.transcriptions.create(
-                model="whisper-1",
+                model=settings.STT_MODEL,
                 file=audio_file,
                 response_format="text"
             )

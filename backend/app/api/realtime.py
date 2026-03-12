@@ -106,8 +106,7 @@ async def realtime_interview_endpoint(websocket: WebSocket, token: str, db: Sess
 本次面试流程：
 1. **自我介绍** (intro)：请候选人进行简短的自我介绍。
 2. **主问题问答** (qa)：根据题目列表进行提问，并根据节奏进行追问。
-3. **候选人提问** (candidate_q)：主问题结束后，邀请候选人提问。
-4. **自然结束** (closing)：礼貌地结束面试。
+3. **自然结束** (closing)：主问题结束后礼貌地结束面试。
 
 本次面试规则与参数：
 1. **主问题数量**：本次面试共包含 {main_question_count} 个主问题。
@@ -122,7 +121,11 @@ async def realtime_interview_endpoint(websocket: WebSocket, token: str, db: Sess
    - 如果回答明显不完整或遗漏关键点，且时间允许，请使用简短的话语提示引导候选人补充。
 7. **被打断处理**：如果候选人在你确认回答完整前提到新话题，先简短回应，然后提醒“我们先把刚才那个问题说完”。
 8. **长时间未回答**：若你收到系统提示“候选人尚未回答”，请简短重复当前问题或礼貌提醒候选人作答（例如：“您可以先简单说说想法，不必紧张。”），不要换题。
-9. **语气与语言**：语气要专业、礼貌且富有同理心。整个过程请使用中文。
+9. **跑题引导（高优先级）**：
+   - 如果候选人询问与本次能力评估无关的 HR 或公司类话题（如：薪资、福利、职级、假期、制度、团队文化、具体业务细节、公司发展等），请统一回复：“本次面试仅作为能力评估，关于公司文化、薪资、制度等其他话题后续会由 HR 或人工面试官为您处理。我们现在继续回到面试中。”
+   - 回复后，请立即将话题拉回到当前的面试题目或流程中。
+10. **面试结束提示**：在面试进入 closing 阶段并完成结语时，请务必包含以下提示：“本次面试到这里就结束了。您可以手动点击‘结束面试’按钮，系统也会在稍后自动为您提交。感谢您的参与！”
+11. **语气与语言**：语气要专业、礼貌且富有同理心。整个过程请使用中文。
 
 题目列表与参考方向：
 {questions_str}
@@ -139,7 +142,9 @@ async def realtime_interview_endpoint(websocket: WebSocket, token: str, db: Sess
                         "threshold": 0.5,
                         "prefix_padding_ms": 300,
                         # 600ms 在真实语音里偏激进，容易把短停顿误判为结束并抢话
-                        "silence_duration_ms": 1200
+                        "silence_duration_ms": 1200,
+                        # We run fully manual turn control to avoid double responses.
+                        "create_response": False
                     },
                 }
             }
@@ -165,17 +170,71 @@ async def realtime_interview_endpoint(websocket: WebSocket, token: str, db: Sess
             # Runtime pacing states
             interview_start_ts = time.time()
             time_budget_sec = expected_duration * 60
-            main_count_target = main_question_count
-            main_questions_asked = 0
+            ordered_questions = sorted(
+                interview.question_set or [],
+                key=lambda q: q.get("order_index", 0),
+            )
+            main_count_target = min(main_question_count, len(ordered_questions))
+            main_questions_completed = 0
+            current_main_question_order = 0
             followups_used_for_current = 0
             overtime_mode = False
             overtime_closing_sent = False
             candidate_speaking = False
-            current_stage = "intro" # intro, qa, candidate_q, closing
+            natural_end_sent = False
+            current_stage = "intro" # intro, qa, closing
+            expected_candidate_reply_for = "intro" # intro, main, followup, None
+            # First question is sent right above; wait for response.done before next response.create.
+            model_response_pending = True
+
+            def get_main_question(order: int):
+                if order <= 0 or order > len(ordered_questions):
+                    return None
+                return ordered_questions[order - 1]
+
+            def build_main_question_instruction(order: int) -> str:
+                question = get_main_question(order)
+                if not question:
+                    return "主问题列表已结束。请立即进入 closing 阶段并完成礼貌结语。"
+                question_text = question.get("question_text", "").strip()
+                reference = (question.get("reference") or "").strip()
+                reference_hint = f"参考方向：{reference}。" if reference else "这是一道开放题。"
+                return (
+                    f"现在进入第 {order}/{main_count_target} 个主问题。请只问这一个问题："
+                    f"{question_text}。{reference_hint} 一次只问一个问题。"
+                )
+
+            def build_followup_instruction(order: int) -> str:
+                question = get_main_question(order)
+                question_text = (question or {}).get("question_text", "").strip()
+                return (
+                    f"请围绕刚才这个主问题做一次简短追问（第 {order} 题：{question_text}）。"
+                    "追问要短、聚焦关键遗漏点，不要切换到新主问题。"
+                )
+
+            def build_closing_instruction() -> str:
+                return (
+                    "所有主问题已完成。请立即进入 closing 阶段，礼貌结束面试，"
+                    "并务必包含以下提示："
+                    "“本次面试到这里就结束了。您可以手动点击‘结束面试’按钮，"
+                    "系统也会在稍后自动为您提交。感谢您的参与！”"
+                    "结束后不要再提出新问题。"
+                )
+
+            async def send_response_create(instructions: str = None):
+                nonlocal model_response_pending
+                if model_response_pending:
+                    logger.info("Skip response.create because previous response is still pending.")
+                    return
+                response_payload = {"type": "response.create", "response": {}}
+                if instructions:
+                    response_payload["response"]["instructions"] = instructions
+                await openai_ws.send(json.dumps(response_payload))
+                model_response_pending = True
 
             # Relay tasks
             async def relay_client_to_openai():
-                nonlocal current_question_index, main_questions_asked, followups_used_for_current, current_stage, overtime_mode, overtime_closing_sent, candidate_speaking
+                nonlocal current_question_index, followups_used_for_current, current_stage, overtime_mode, overtime_closing_sent, candidate_speaking
                 try:
                     async for message in websocket.iter_text():
                         data = json.loads(message)
@@ -196,16 +255,12 @@ async def realtime_interview_endpoint(websocket: WebSocket, token: str, db: Sess
                         elif data.get("type") == "end_turn":
                             logger.info(f"Client manually ended turn for question {current_question_index}")
                             await openai_ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
-                            await openai_ws.send(json.dumps({"type": "response.create"}))
+                            await send_response_create()
                         elif data.get("type") == "no_response_timeout":
-                            if current_stage in ("intro", "qa", "candidate_q") and not overtime_mode and not candidate_speaking:
-                                reask_event = {
-                                    "type": "response.create",
-                                    "response": {
-                                        "instructions": "候选人尚未回答。请简短重复当前问题或礼貌提醒候选人作答（例如：您可以先简单说说想法。），不要换题。"
-                                    }
-                                }
-                                await openai_ws.send(json.dumps(reask_event))
+                            if current_stage in ("intro", "qa") and not overtime_mode and not candidate_speaking:
+                                await send_response_create(
+                                    "候选人尚未回答。请简短重复当前问题或礼貌提醒候选人作答（例如：您可以先简单说说想法。），不要换题。"
+                                )
                                 logger.info(
                                     f"Frontend no-response timeout ({NO_RESPONSE_REASK_SECONDS}s) triggered re-ask for token {token}"
                                 )
@@ -213,7 +268,7 @@ async def realtime_interview_endpoint(websocket: WebSocket, token: str, db: Sess
                     logger.error(f"Client to OpenAI relay error for token {token}: {e}")
 
             async def relay_openai_to_client():
-                nonlocal current_question_index, is_recording_segment, last_transcript, main_questions_asked, followups_used_for_current, current_stage, overtime_mode, overtime_closing_sent, candidate_speaking
+                nonlocal current_question_index, is_recording_segment, last_transcript, main_questions_completed, current_main_question_order, followups_used_for_current, current_stage, overtime_mode, overtime_closing_sent, candidate_speaking, natural_end_sent, expected_candidate_reply_for, model_response_pending
                 try:
                     async for message in openai_ws:
                         event = json.loads(message)
@@ -252,6 +307,7 @@ async def realtime_interview_endpoint(websocket: WebSocket, token: str, db: Sess
                         # 2. Handle Errors
                         elif event_type == "error":
                             logger.error(f"OpenAI Realtime Error for token {token}: {json.dumps(event, indent=2)}")
+                            model_response_pending = False
                         
                         # 3. Handle VAD Events for precise recording
                         elif event_type == "input_audio_buffer.speech_started":
@@ -264,12 +320,10 @@ async def realtime_interview_endpoint(websocket: WebSocket, token: str, db: Sess
                             logger.info(f"VAD: Speech stopped for question {current_question_index}")
                             is_recording_segment = False
                             candidate_speaking = False
-                            
-                            # Automatically commit and create response on speech stopped (Voice Agent behavior)
-                            # Note: In server_vad mode with create_response=true, OpenAI will automatically
-                            # commit the buffer and create a response. We don't need to manually send these.
-                            # await openai_ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
-                            # await openai_ws.send(json.dumps({"type": "response.create"}))
+                            if model_response_pending:
+                                logger.info("Ignore speech_stopped because model response is still pending.")
+                                continue
+                            await openai_ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
 
                             # Handle pacing and overtime logic before OpenAI automatically responds
                             elapsed = time.time() - interview_start_ts
@@ -285,13 +339,7 @@ async def realtime_interview_endpoint(websocket: WebSocket, token: str, db: Sess
                             if elapsed >= (time_budget_sec + hard_timeout_buffer):
                                 logger.info(f"Interview reached hard timeout ({elapsed:.1f}s). Forcing close.")
                                 # Send a final message and close
-                                force_close_event = {
-                                    "type": "response.create",
-                                    "response": {
-                                        "instructions": "面试时间已严重超时，请立即告知候选人面试必须结束，并直接进行结语。然后停止发言。"
-                                    }
-                                }
-                                await openai_ws.send(json.dumps(force_close_event))
+                                await send_response_create("面试时间已严重超时，请立即告知候选人面试必须结束，并直接进行结语。然后停止发言。")
                                 # We'll let the response finish before closing the WS, or just close it after a short delay
                                 # For now, we'll mark it for closing in the next turn or just let the AI finish the sentence.
                                 # To be safe, we can wait a bit then close.
@@ -299,55 +347,32 @@ async def realtime_interview_endpoint(websocket: WebSocket, token: str, db: Sess
                                 await websocket.close(code=1000, reason="Interview hard timeout")
                                 return
 
-                            # Determine pacing instructions
-                            pacing_instruction = ""
-                            if overtime_mode:
-                                if not overtime_closing_sent:
-                                    pacing_instruction = "面试时间已到。请不要再问新的主问题或追问，礼貌自然地结束面试。如果候选人刚才在提问，请简短回答后结束。进入 closing stage。"
-                                    overtime_closing_sent = True
-                                    current_stage = "closing"
-                            else:
-                                # Progress based pacing
-                                q_progress = main_questions_asked / main_count_target if main_count_target > 0 else 1
-                                if elapsed_ratio > q_progress + 0.1: # Falling behind
-                                    pacing_instruction = "节奏落后：请减少或停止追问，尽快进入下一个主问题。"
-                                elif current_stage == "intro" and elapsed > 120: # Intro taking too long (>2min)
-                                    pacing_instruction = "自我介绍时间较长，请适时结束并进入第一个主问题 (qa stage)。"
-                                
-                                if main_questions_asked >= main_count_target and current_stage == "qa":
-                                    pacing_instruction = "所有主问题已问完。请进入候选人提问环节 (candidate_q stage)。"
-                                    current_stage = "candidate_q"
-
-                            if pacing_instruction:
-                                logger.info(f"Pacing: {pacing_instruction}")
-                                # Send a session update or response create with pacing instructions
-                                # Since OpenAI server_vad=true automatically creates a response, 
-                                # we can try to send a session.update right before it starts generating, 
-                                # or send a manual response.create if we want to override.
-                                # A safer way in Realtime is to update session instructions or send a conversation item.
-                                pacing_event = {
-                                    "type": "response.create",
-                                    "response": {
-                                        "instructions": pacing_instruction
-                                    }
-                                }
-                                await openai_ws.send(json.dumps(pacing_event))
-
                             # Capture user's input
+                            answer_question_index = 0
+                            if expected_candidate_reply_for in ("main", "followup") and current_main_question_order > 0:
+                                answer_question_index = current_main_question_order
+                            logger.info(
+                                "TurnState stage=%s expected=%s main_order=%s completed=%s answer_idx=%s",
+                                current_stage,
+                                expected_candidate_reply_for,
+                                current_main_question_order,
+                                main_questions_completed,
+                                answer_question_index,
+                            )
                             if audio_buffer:
                                 pcm_data = b"".join(audio_buffer)
                                 wav_data = pcm16_to_wav(pcm_data)
                                 
-                                file_name = f"{token}_{current_question_index}_{secrets.token_hex(4)}.wav"
+                                file_name = f"{token}_{answer_question_index}_{secrets.token_hex(4)}.wav"
                                 file_path = os.path.join(settings.UPLOAD_DIR, file_name)
                                 with open(file_path, "wb") as f:
                                     f.write(wav_data)
                                 
-                                logger.info(f"VAD: Saved speech segment for question {current_question_index} to {file_path}")
+                                logger.info(f"VAD: Saved speech segment for question {answer_question_index} to {file_path}")
                                 
                                 db_answer = Answer(
                                     interview_id=interview.id,
-                                    question_index=current_question_index,
+                                    question_index=answer_question_index,
                                     audio_url=file_path,
                                     transcript=None
                                 )
@@ -355,30 +380,88 @@ async def realtime_interview_endpoint(websocket: WebSocket, token: str, db: Sess
                                 db.commit()
                                 
                                 audio_buffer.clear()
+
+                            # Determine next controlled response
+                            control_instruction = ""
+                            if overtime_mode:
+                                if not overtime_closing_sent:
+                                    control_instruction = (
+                                        "面试时间已到。请不要再问新的主问题或追问，"
+                                        "礼貌自然地结束面试。如果候选人刚才在提问，"
+                                        "请简短回答后结束。进入 closing stage。"
+                                    )
+                                    overtime_closing_sent = True
+                                    current_stage = "closing"
+                                else:
+                                    control_instruction = build_closing_instruction()
+                                expected_candidate_reply_for = None
+                            elif current_stage == "intro":
+                                if main_count_target <= 0:
+                                    current_stage = "closing"
+                                    control_instruction = build_closing_instruction()
+                                    expected_candidate_reply_for = None
+                                else:
+                                    current_stage = "qa"
+                                    current_main_question_order = 1
+                                    current_question_index = current_main_question_order
+                                    followups_used_for_current = 0
+                                    control_instruction = build_main_question_instruction(current_main_question_order)
+                                    expected_candidate_reply_for = "main"
+                            elif current_stage == "qa":
+                                if expected_candidate_reply_for == "main":
+                                    main_questions_completed += 1
+                                expected_candidate_reply_for = None
+
+                                if main_questions_completed >= main_count_target:
+                                    current_stage = "closing"
+                                    control_instruction = build_closing_instruction()
+                                elif (
+                                    followups_used_for_current < followup_limit
+                                    and current_main_question_order > 0
+                                    and expected_duration > 0
+                                    and elapsed_ratio <= 0.95
+                                ):
+                                    followups_used_for_current += 1
+                                    current_question_index = current_main_question_order
+                                    control_instruction = build_followup_instruction(current_main_question_order)
+                                    expected_candidate_reply_for = "followup"
+                                else:
+                                    current_main_question_order = main_questions_completed + 1
+                                    current_question_index = current_main_question_order
+                                    followups_used_for_current = 0
+                                    control_instruction = build_main_question_instruction(current_main_question_order)
+                                    expected_candidate_reply_for = "main"
+                            elif current_stage == "closing":
+                                # Closing stage should not ask new questions.
+                                current_stage = "closing"
+                                control_instruction = build_closing_instruction()
+                                expected_candidate_reply_for = None
+
+                            if control_instruction:
+                                logger.info(f"Control instruction: {control_instruction}")
+                                await send_response_create(control_instruction)
                         
                         elif event_type == "response.done":
                             logger.info(f"OpenAI: Response done. Transcript: {last_transcript}")
-                            # Only increment question index if AI actually said something substantial
-                            if len(last_transcript.strip()) > 5:
-                                # Cap the question index at the number of questions in the set
-                                max_questions = len(interview.question_set)
-                                if current_question_index < max_questions:
-                                    current_question_index += 1
-                                    main_questions_asked += 1
-                                    followups_used_for_current = 0
-                                    if current_stage == "intro":
-                                        current_stage = "qa"
-                                else:
-                                    # This might be a follow-up
-                                    followups_used_for_current += 1
+                            model_response_pending = False
+                            
+                            # Check if we just finished the closing stage
+                            if current_stage == "closing" and not natural_end_sent:
+                                logger.info(f"Interview natural end reached for token {token}")
+                                # Notify frontend about the natural end
+                                await websocket.send_text(json.dumps({"type": "interview.natural_end"}))
+                                natural_end_sent = True
+                                # Give frontend a moment to receive the event before we potentially close
+                                await asyncio.sleep(1)
+                                # We don't close the websocket here to allow the frontend to handle the 15s countdown
+                                # and call the /complete API. The frontend will close it.
                             last_transcript = ""
                             
                         # Forward other useful events to client
                         elif event_type in ["response.created", "response.completed", "conversation.item.created", "session.updated", "session.created"]:
+                            if event_type == "response.created":
+                                model_response_pending = True
                             await websocket.send_text(json.dumps(event))
-                            
-                except Exception as e:
-                    logger.error(f"OpenAI to Client relay error for token {token}: {e}")
                             
                 except Exception as e:
                     logger.error(f"OpenAI to Client relay error for token {token}: {e}")

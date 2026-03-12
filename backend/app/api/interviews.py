@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks
 from sqlalchemy.orm import Session
 import secrets
 import os
@@ -6,7 +6,7 @@ import random
 from datetime import datetime
 from typing import List
 
-from ..database import get_db
+from ..database import get_db, SessionLocal
 from ..models.interview import Interview, InterviewStatus
 from ..models.job_profile import JobProfile
 from ..models.answer import Answer
@@ -17,6 +17,46 @@ from ..services.evaluator import evaluate_interview
 from ..config import settings
 
 router = APIRouter()
+
+async def process_interview_evaluation(interview_id: int):
+    """
+    Background task to perform STT and LLM evaluation.
+    """
+    db = SessionLocal()
+    try:
+        interview = db.query(Interview).filter(Interview.id == interview_id).first()
+        if not interview:
+            return
+
+        answers = db.query(Answer).filter(Answer.interview_id == interview.id).all()
+        
+        # 1. Perform STT for each answer if not already done
+        for answer in answers:
+            if not answer.transcript and os.path.exists(answer.audio_url):
+                answer.transcript = await transcribe_audio(answer.audio_url)
+        
+        db.commit() # Save transcripts
+        
+        # 2. LLM Evaluation on all transcripts
+        question_map = {q['order_index']: q['question_text'] for q in interview.question_set}
+        
+        answers_data = [
+            {
+                "question_index": a.question_index, 
+                "question_text": question_map.get(a.question_index, "未知问题"),
+                "transcript": a.transcript or ""
+            } 
+            for a in answers
+        ]
+        
+        evaluation = await evaluate_interview(answers_data)
+        
+        interview.evaluation_result = evaluation
+        db.commit()
+    except Exception as e:
+        print(f"Error in background evaluation task: {e}")
+    finally:
+        db.close()
 
 @router.post("/create", response_model=InterviewResponse)
 def create_interview(interview_in: InterviewCreate, db: Session = Depends(get_db)):
@@ -108,38 +148,20 @@ async def submit_answer(
     return db_answer
 
 @router.post("/{token}/complete")
-async def complete_interview(token: str, db: Session = Depends(get_db)):
+async def complete_interview(token: str, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     interview = db.query(Interview).filter(Interview.link_token == token).first()
     if not interview:
         raise HTTPException(status_code=404, detail="Interview not found")
     
-    answers = db.query(Answer).filter(Answer.interview_id == interview.id).all()
-    
-    # 1. Perform STT for each answer if not already done
-    for answer in answers:
-        if not answer.transcript and os.path.exists(answer.audio_url):
-            answer.transcript = await transcribe_audio(answer.audio_url)
-    
-    db.commit() # Save transcripts
-    
-    # 2. LLM Evaluation on all transcripts
-    # Map question_text from question_set
-    question_map = {q['order_index']: q['question_text'] for q in interview.question_set}
-    
-    answers_data = [
-        {
-            "question_index": a.question_index, 
-            "question_text": question_map.get(a.question_index, "未知问题"),
-            "transcript": a.transcript or ""
-        } 
-        for a in answers
-    ]
-    
-    evaluation = await evaluate_interview(answers_data)
-    
+    if interview.status == InterviewStatus.FINISHED:
+        return {"message": "Interview already completed"}
+
+    # 1. Update status immediately
     interview.status = InterviewStatus.FINISHED
-    interview.evaluation_result = evaluation
     interview.completed_at = datetime.utcnow()
-    
     db.commit()
-    return {"message": "Interview completed", "evaluation": evaluation}
+    
+    # 2. Add background task for STT and LLM evaluation
+    background_tasks.add_task(process_interview_evaluation, interview.id)
+    
+    return {"message": "Interview submitted successfully"}
