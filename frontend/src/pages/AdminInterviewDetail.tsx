@@ -7,6 +7,7 @@ const AdminInterviewDetail: React.FC = () => {
   const navigate = useNavigate();
   const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<{ code: number; message: string } | null>(null);
 
   useEffect(() => {
     const token = localStorage.getItem('admin_token');
@@ -14,6 +15,12 @@ const AdminInterviewDetail: React.FC = () => {
       headers: { Authorization: `Bearer ${token}` }
     })
     .then(res => setData(res.data))
+    .catch(err => {
+      setError({
+        code: err.response?.status || 500,
+        message: err.response?.data?.detail || err.message
+      });
+    })
     .finally(() => setLoading(false));
   }, [id]);
 
@@ -31,6 +38,24 @@ const AdminInterviewDetail: React.FC = () => {
 
   return (
     <div style={{ padding: '20px', maxWidth: '800px', margin: '0 auto', color: 'var(--text)' }}>
+      {error && (
+        <div style={{
+          padding: '10px 20px',
+          backgroundColor: 'rgba(255, 77, 79, 0.1)',
+          border: '1px solid #ff4d4f',
+          borderRadius: '4px',
+          color: '#ff4d4f',
+          marginBottom: '20px',
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center'
+        }}>
+          <span>
+            <strong>Error {error.code}:</strong> {error.message}
+          </span>
+          <button onClick={() => setError(null)} style={{ background: 'none', border: 'none', color: '#ff4d4f', cursor: 'pointer', fontSize: '18px' }}>✕</button>
+        </div>
+      )}
       <button 
         onClick={() => navigate('/admin/interviews')}
         style={{ 

@@ -8,12 +8,10 @@ from ..models.admin_user import AdminUser
 from ..models.interview import Interview
 from ..models.answer import Answer
 from ..schemas.admin import AdminLogin, Token, InterviewSummary
-from ..services.auth import verify_password, create_access_token, get_password_hash
+from ..services.auth import verify_password, create_access_token, get_password_hash, get_current_admin
 from ..config import settings
 
 router = APIRouter()
-
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/admin/login")
 
 @router.post("/login", response_model=Token)
 def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
@@ -47,7 +45,7 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
     return {"access_token": access_token, "token_type": "bearer"}
 
 @router.get("/interviews", response_model=List[InterviewSummary])
-def list_interviews(db: Session = Depends(get_db)):
+def list_interviews(db: Session = Depends(get_db), current_admin: AdminUser = Depends(get_current_admin)):
     interviews = db.query(Interview).all()
     # Map to summary including score from JSON
     results = []
@@ -64,7 +62,7 @@ def list_interviews(db: Session = Depends(get_db)):
     return results
 
 @router.get("/interviews/{interview_id}")
-def get_interview_detail(interview_id: int, db: Session = Depends(get_db)):
+def get_interview_detail(interview_id: int, db: Session = Depends(get_db), current_admin: AdminUser = Depends(get_current_admin)):
     interview = db.query(Interview).filter(Interview.id == interview_id).first()
     if not interview:
         raise HTTPException(status_code=404, detail="Interview not found")
@@ -78,7 +76,7 @@ def get_interview_detail(interview_id: int, db: Session = Depends(get_db)):
 
 
 @router.delete("/interviews/{interview_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_interview(interview_id: int, db: Session = Depends(get_db)):
+def delete_interview(interview_id: int, db: Session = Depends(get_db), current_admin: AdminUser = Depends(get_current_admin)):
     interview = db.query(Interview).filter(Interview.id == interview_id).first()
     if not interview:
         raise HTTPException(status_code=404, detail="Interview not found")

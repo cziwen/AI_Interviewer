@@ -21,6 +21,7 @@ const AdminInterviews: React.FC = () => {
   const [interviews, setInterviews] = useState<InterviewSummary[]>([]);
   const [jobProfiles, setJobProfiles] = useState<JobProfileSummary[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<{ code: number; message: string } | null>(null);
   const [showModal, setShowModal] = useState(false);
   const [showJobModal, setShowJobModal] = useState(false);
   const [newInterview, setNewInterview] = useState({ name: '', position_key: '', resume_brief: '' });
@@ -45,6 +46,12 @@ const AdminInterviews: React.FC = () => {
       headers: { Authorization: `Bearer ${token}` }
     })
     .then(res => setInterviews(res.data))
+    .catch(err => {
+      setError({
+        code: err.response?.status || 500,
+        message: err.response?.data?.detail || err.message
+      });
+    })
     .finally(() => setLoading(false));
   };
 
@@ -52,8 +59,12 @@ const AdminInterviews: React.FC = () => {
     try {
       const data = await getJobProfiles();
       setJobProfiles(data);
-    } catch (err) {
+    } catch (err: any) {
       console.error('Failed to fetch job profiles:', err);
+      setError({
+        code: err.response?.status || 500,
+        message: err.response?.data?.detail || err.message
+      });
     }
   };
 
@@ -73,8 +84,11 @@ const AdminInterviews: React.FC = () => {
       const link = `${window.location.origin}/interview/${res.link_token}`;
       setCreatedLink(link);
       fetchInterviews();
-    } catch (err) {
-      alert('创建失败，请重试');
+    } catch (err: any) {
+      setError({
+        code: err.response?.status || 500,
+        message: err.response?.data?.detail || err.message
+      });
     } finally {
       setSubmitting(false);
     }
@@ -97,8 +111,11 @@ const AdminInterviews: React.FC = () => {
       setShowJobModal(false);
       setNewJob({ position_key: '', position_name: '', jd_file: null, question_csv: null });
       fetchJobProfiles();
-    } catch (err) {
-      alert('上传失败，请检查文件格式');
+    } catch (err: any) {
+      setError({
+        code: err.response?.status || 500,
+        message: err.response?.data?.detail || err.message
+      });
     } finally {
       setJobSubmitting(false);
     }
@@ -113,8 +130,11 @@ const AdminInterviews: React.FC = () => {
         headers: { Authorization: `Bearer ${token}` }
       });
       setInterviews(interviews.filter(i => i.id !== id));
-    } catch (err) {
-      alert('删除失败，请重试');
+    } catch (err: any) {
+      setError({
+        code: err.response?.status || 500,
+        message: err.response?.data?.detail || err.message
+      });
     }
   };
 
@@ -133,6 +153,24 @@ const AdminInterviews: React.FC = () => {
 
   return (
     <div style={{ padding: '20px', color: 'var(--text)' }}>
+      {error && (
+        <div style={{
+          padding: '10px 20px',
+          backgroundColor: 'rgba(255, 77, 79, 0.1)',
+          border: '1px solid #ff4d4f',
+          borderRadius: '4px',
+          color: '#ff4d4f',
+          marginBottom: '20px',
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center'
+        }}>
+          <span>
+            <strong>Error {error.code}:</strong> {error.message}
+          </span>
+          <button onClick={() => setError(null)} style={{ background: 'none', border: 'none', color: '#ff4d4f', cursor: 'pointer', fontSize: '18px' }}>✕</button>
+        </div>
+      )}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px' }}>
         <h2 style={{ color: 'var(--text)', margin: 0 }}>面试列表</h2>
         <div style={{ display: 'flex', gap: '10px' }}>
