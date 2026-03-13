@@ -1,4 +1,6 @@
 # ISSUE
 
 
-1. 请查看lo！！！！，当前面试仅成功结束一次。第二次面试在提出第二个问题的时候就 触发了 closing stage。说明状态不对齐。
+1. 刚更新 logging，现在每个 interview 会生成 2种 log，分别为后台log，和 dialogue log。（未测试）
+
+2. 因为更新了 dialogue log, ai 评测部分其实可以节约掉一个 STT 模块的费用调用，直接用 LLM 即可。

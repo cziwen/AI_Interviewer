@@ -12,7 +12,8 @@ from ..models.interview import Interview, InterviewStatus
 from ..models.job_profile import JobProfile
 from ..models.answer import Answer
 from ..config import settings
-from ..utils.logger import logger
+from ..utils.logger import logger, log_interview_event, log_dialogue_line
+from ..utils.usage_tracker import InterviewUsageTracker
 from ..services.realtime_turn_orchestrator import (
     RealtimeTurnOrchestrator,
     TurnPlan,
@@ -55,7 +56,17 @@ async def realtime_interview_endpoint(websocket: WebSocket, token: str, db: Sess
         return
 
     await websocket.accept()
-    logger.info(f"WebSocket connected for token: {token}, Candidate: {interview.name}")
+    log_interview_event(
+        event_name="ws.connected",
+        interview_id=interview.id,
+        interview_token=token,
+        source="api.realtime",
+        stage="intro",
+        details={
+            "candidate_name": interview.name,
+            "position": interview.position
+        }
+    )
 
     # Fetch JobProfile if available to get JD metadata
     jd_info = "暂无详细岗位要求"
@@ -89,6 +100,9 @@ async def realtime_interview_endpoint(websocket: WebSocket, token: str, db: Sess
         position=interview.position or '基础岗位'
     )
 
+    # Initialize Usage Tracker
+    usage_tracker = InterviewUsageTracker(interview_id=interview.id, interview_token=token)
+
     # Connect to OpenAI Realtime
     headers = {
         "Authorization": f"Bearer {settings.OPENAI_API_KEY}",
@@ -96,9 +110,19 @@ async def realtime_interview_endpoint(websocket: WebSocket, token: str, db: Sess
     }
 
     try:
-        logger.info(f"Connecting to OpenAI Realtime for token: {token}")
+        log_interview_event(
+            event_name="openai.connecting",
+            interview_id=interview.id,
+            interview_token=token,
+            source="api.realtime"
+        )
         async with websockets.connect(OPENAI_REALTIME_URL, additional_headers=headers) as openai_ws:
-            logger.info(f"OpenAI Realtime connection established for token: {token}")
+            log_interview_event(
+                event_name="openai.connected",
+                interview_id=interview.id,
+                interview_token=token,
+                source="api.realtime"
+            )
 
             # Format question list with references
             formatted_questions = []
@@ -201,22 +225,24 @@ async def realtime_interview_endpoint(websocket: WebSocket, token: str, db: Sess
             def log_turn_state(event: str, extra: dict = None):
                 """Enhanced logging with turn context"""
                 active_turn = orchestrator.get_active_turn()
-                state = {
-                    "event": event,
-                    "token": token,
-                    "stage": current_stage.value,
-                    "q_order": current_main_question_order,
-                    "q_completed": main_questions_completed,
-                    "followups_used": followups_used_for_current,
-                    "expected_reply": expected_candidate_reply_for,
-                    "overtime": overtime_mode,
-                    "ts": time.time() - interview_start_ts,
-                    "turn_id": active_turn.turn_id if active_turn else None,
-                    "turn_status": active_turn.status.value if active_turn else None
-                }
-                if extra:
-                    state.update(extra)
-                logger.info(f"INTERVIEW_STATE: {json.dumps(state, ensure_ascii=False)}")
+                
+                # Interview Log Schema
+                log_interview_event(
+                    event_name=event,
+                    interview_id=interview.id,
+                    interview_token=token,
+                    source="turn_orchestrator",
+                    stage=current_stage.value,
+                    turn_id=active_turn.turn_id if active_turn else None,
+                    details=extra,
+                    # Additional schema fields
+                    question_order=current_main_question_order,
+                    main_completed_count=main_questions_completed,
+                    followups_used=followups_used_for_current,
+                    expected_reply=expected_candidate_reply_for,
+                    overtime_mode=overtime_mode,
+                    turn_status=active_turn.status.value if active_turn else None
+                )
 
             log_turn_state("INTERVIEW_SESSION_START", {
                 "candidate": interview.name,
@@ -670,12 +696,27 @@ async def realtime_interview_endpoint(websocket: WebSocket, token: str, db: Sess
 
                         # Log non-delta events
                         if event_type not in ["response.audio.delta", "response.audio_transcript.delta", "response.text.delta"]:
-                            logger.info(f"OpenAI Event: {event_type} - {json.dumps(event)}")
+                            # Skip common events to avoid cluttering Server Log
+                            if event_type not in ["input_audio_buffer.append", "input_audio_buffer.speech_started", "input_audio_buffer.speech_stopped", "response.audio.delta", "response.text.delta", "response.audio_transcript.delta"]:
+                                pass # Already handled by log_interview_event or too verbose
 
                         # 1. Handle Audio/Text Deltas for UI
                         if event_type in ["response.audio.delta", "response.text.delta", "response.audio_transcript.delta"]:
                             # Handle response.audio.delta properly
                             if event_type == "response.audio.delta":
+                                delta_audio = event.get("delta", "")
+                                if delta_audio:
+                                    # Record AI audio output usage (assuming 24kHz PCM16)
+                                    try:
+                                        pcm_bytes = base64.b64decode(delta_audio)
+                                        # 24kHz * 2 bytes per sample = 48000 bytes per second
+                                        usage_tracker.add_audio_usage(
+                                            model_name="gpt-realtime-mini",
+                                            output_seconds=len(pcm_bytes) / 48000.0
+                                        )
+                                    except Exception as e:
+                                        logger.error(f"Failed to decode audio delta for usage tracking: {e}")
+
                                 if "delta" in event:
                                     modified_event = event.copy()
                                     modified_event["audio"] = event["delta"]
@@ -712,6 +753,27 @@ async def realtime_interview_endpoint(websocket: WebSocket, token: str, db: Sess
                             status = response.get("status")
                             status_details = response.get("status_details", {})
                             usage = response.get("usage")
+                            
+                            if usage:
+                                model_name = "gpt-realtime-mini" # Default or from response if available
+                                usage_tracker.add_text_usage(
+                                    model_name=model_name,
+                                    input_tokens=usage.get("input_tokens", 0),
+                                    output_tokens=usage.get("output_tokens", 0)
+                                )
+                                # Realtime API also provides audio tokens in usage, but user wants seconds for audio if possible.
+                                # However, for consistency with text, we could also store audio_tokens if they exist.
+                                # For now, let's stick to the plan of using audio seconds from VAD.
+
+                            log_interview_event(
+                                event_name="openai.response.done",
+                                interview_id=interview.id,
+                                interview_token=token,
+                                source="api.realtime",
+                                openai_response_id=response_id,
+                                outcome=status,
+                                details={"usage": usage}
+                            )
 
                             if status == "completed":
                                 # Turn completed successfully
@@ -771,6 +833,14 @@ async def realtime_interview_endpoint(websocket: WebSocket, token: str, db: Sess
                                         "turn_id": turn.turn_id,
                                         "transcript_len": len(turn.transcript)
                                     })
+                                    
+                                    # Write to Dialogue Log
+                                    if turn.transcript:
+                                        log_dialogue_line(
+                                            interview_token=token,
+                                            role="AI",
+                                            text=turn.transcript
+                                        )
 
                             elif status == "cancelled":
                                 # Turn was cancelled (e.g., turn_detected)
@@ -801,8 +871,18 @@ async def realtime_interview_endpoint(websocket: WebSocket, token: str, db: Sess
 
                         # 4. Handle Errors
                         elif event_type == "error":
-                            logger.error(f"OpenAI Error: {json.dumps(event, indent=2)}")
                             err = event.get("error", {}) or {}
+                            log_interview_event(
+                                event_name="openai.error",
+                                interview_id=interview.id,
+                                interview_token=token,
+                                level=logging.ERROR,
+                                source="api.realtime",
+                                outcome="failed",
+                                error_code=err.get("code"),
+                                error_message=err.get("message"),
+                                details=event
+                            )
 
                             if err.get("code") == "input_audio_buffer_commit_empty":
                                 # This is a commit error, not a turn error
@@ -827,10 +907,14 @@ async def realtime_interview_endpoint(websocket: WebSocket, token: str, db: Sess
                         # 5. Handle VAD Events
                         elif event_type == "input_audio_buffer.speech_started":
                             audio_start_ms = event.get("audio_start_ms", 0)
-                            logger.info(f"VAD: Speech started (audio_start_ms: {audio_start_ms})")
-                            log_turn_state("VAD_SPEECH_STARTED", {
-                                "audio_start_ms": audio_start_ms
-                            })
+                            log_interview_event(
+                                event_name="vad.speech_started",
+                                interview_id=interview.id,
+                                interview_token=token,
+                                source="api.realtime",
+                                stage=current_stage.value,
+                                details={"audio_start_ms": audio_start_ms}
+                            )
                             is_recording_segment = True
                             candidate_speaking = True
                             current_input_item_id = event.get("item_id")
@@ -838,15 +922,14 @@ async def realtime_interview_endpoint(websocket: WebSocket, token: str, db: Sess
 
                         elif event_type == "input_audio_buffer.speech_stopped":
                             audio_end_ms = event.get("audio_end_ms", 0)
-
-                            # Calculate speech duration based on audio buffer
-                            # Note: audio_start_ms might not be in this event, check if we have it stored
-                            speech_duration_ms = audio_end_ms - (audio_start_ms if 'audio_start_ms' in locals() else 0)
-
-                            logger.info(f"VAD: Speech stopped (audio_end_ms: {audio_end_ms})")
-                            log_turn_state("VAD_SPEECH_STOPPED_RAW", {
-                                "audio_end_ms": audio_end_ms
-                            })
+                            log_interview_event(
+                                event_name="vad.speech_stopped",
+                                interview_id=interview.id,
+                                interview_token=token,
+                                source="api.realtime",
+                                stage=current_stage.value,
+                                details={"audio_end_ms": audio_end_ms}
+                            )
                             is_recording_segment = False
                             candidate_speaking = False
                             current_input_item_id = event.get("item_id") or current_input_item_id
@@ -886,7 +969,24 @@ async def realtime_interview_endpoint(websocket: WebSocket, token: str, db: Sess
                                 with open(file_path, "wb") as f:
                                     f.write(wav_data)
 
-                                logger.info(f"VAD: Saved speech segment for question {answer_question_index}")
+                                log_interview_event(
+                                    event_name="vad.segment_saved",
+                                    interview_id=interview.id,
+                                    interview_token=token,
+                                    source="api.realtime",
+                                    stage=current_stage.value,
+                                    details={
+                                        "file_path": file_path,
+                                        "question_index": answer_question_index,
+                                        "duration_ms": len(pcm_data) / 48 # 24kHz * 2 bytes = 48 bytes per ms
+                                    }
+                                )
+
+                                # Record audio input usage
+                                usage_tracker.add_audio_usage(
+                                    model_name="gpt-realtime-mini",
+                                    input_seconds=len(pcm_data) / 48000.0 # 24kHz * 2 bytes = 48000 bytes per second
+                                )
 
                                 db_answer = Answer(
                                     interview_id=interview.id,
@@ -935,11 +1035,29 @@ async def realtime_interview_endpoint(websocket: WebSocket, token: str, db: Sess
             await asyncio.gather(relay_client_to_openai(), relay_openai_to_client())
 
     except WebSocketDisconnect:
-        logger.info(f"Client disconnected: {token}")
+        log_interview_event(
+            event_name="ws.disconnected",
+            interview_id=interview.id,
+            interview_token=token,
+            source="api.realtime",
+            outcome="success"
+        )
     except Exception as e:
-        logger.error(f"Realtime session error for token {token}: {e}")
+        log_interview_event(
+            event_name="ws.error",
+            interview_id=interview.id,
+            interview_token=token,
+            level=logging.ERROR,
+            source="api.realtime",
+            outcome="failed",
+            error_message=str(e)
+        )
         await websocket.close(code=1011)
     finally:
+        # Log final usage summary
+        if 'usage_tracker' in locals():
+            usage_tracker.log_summary()
+
         # Log final orchestrator stats
         if 'orchestrator' in locals():
             logger.info(f"ORCHESTRATOR_STATS: {json.dumps(orchestrator.get_stats())}")

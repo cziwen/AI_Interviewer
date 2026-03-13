@@ -3,16 +3,17 @@ import openai
 from typing import List, Dict, Any
 from ..config import settings
 
-async def evaluate_interview(answers: List[Dict[str, Any]]) -> Dict[str, Any]:
+async def evaluate_interview(answers: List[Dict[str, Any]]) -> tuple[Dict[str, Any], Dict[str, int]]:
     """
     使用 OpenAI Chat Completion API 对整场面试进行统一评分。
+    返回 (result_dict, usage_dict)
     """
     if not settings.OPENAI_API_KEY:
         return {
             "total_score": 0,
             "dimension_scores": {},
             "comment": "OpenAI API Key not configured."
-        }
+        }, {"input_tokens": 0, "output_tokens": 0}
 
     client = openai.AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
     
@@ -47,11 +48,15 @@ async def evaluate_interview(answers: List[Dict[str, Any]]) -> Dict[str, Any]:
         )
         
         result = json.loads(response.choices[0].message.content)
-        return result
+        usage = {
+            "input_tokens": response.usage.prompt_tokens,
+            "output_tokens": response.usage.completion_tokens
+        }
+        return result, usage
     except Exception as e:
         print(f"LLM evaluation error: {e}")
         return {
             "total_score": 0,
             "dimension_scores": {},
             "comment": f"评分生成失败: {str(e)}"
-        }
+        }, {"input_tokens": 0, "output_tokens": 0}

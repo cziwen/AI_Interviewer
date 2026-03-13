@@ -8,7 +8,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional, Dict, List
 from enum import Enum
-from ..utils.logger import logger
+from ..utils.logger import logger, log_interview_event
 
 
 class TurnKind(str, Enum):
@@ -160,7 +160,16 @@ class RealtimeTurnOrchestrator:
         self.active_turn_id = turn_id
         self.turns_created += 1
 
-        logger.info(f"TURN_CREATED: {json.dumps(turn.to_log_dict())}")
+        log_interview_event(
+            event_name="turn.created",
+            interview_token=self.token,
+            source="turn_orchestrator",
+            stage=current_stage.value,
+            turn_id=str(turn_id),
+            details=turn.to_log_dict(),
+            question_order=question_order,
+            turn_kind=turn.turn_kind.value
+        )
         return turn
 
     def bind_response(self, response_id: str) -> Optional[TurnContext]:
@@ -224,7 +233,16 @@ class RealtimeTurnOrchestrator:
         if usage:
             log_data["usage"] = usage
 
-        logger.info(f"TURN_COMPLETED: {json.dumps(log_data)}")
+        log_interview_event(
+            event_name="turn.completed",
+            interview_token=self.token,
+            source="turn_orchestrator",
+            turn_id=str(turn_id),
+            outcome="success",
+            details=log_data,
+            duration_ms=int((turn.completed_ts - turn.created_ts) * 1000) if turn.completed_ts else None,
+            openai_response_id=response_id
+        )
         return turn
 
     def cancel_turn(self, response_id: str, reason: str) -> Optional[TurnContext]:
@@ -253,7 +271,15 @@ class RealtimeTurnOrchestrator:
         if self.active_turn_id == turn_id:
             self.active_turn_id = None
 
-        logger.info(f"TURN_CANCELLED: {json.dumps(turn.to_log_dict())}")
+        log_interview_event(
+            event_name="turn.cancelled",
+            interview_token=self.token,
+            source="turn_orchestrator",
+            turn_id=str(turn_id),
+            outcome="cancelled",
+            details=turn.to_log_dict(),
+            openai_response_id=response_id
+        )
         return turn
 
     def fail_turn(self, response_id: str, error_code: str, error_message: str) -> Optional[TurnContext]:
@@ -278,7 +304,17 @@ class RealtimeTurnOrchestrator:
         if self.active_turn_id == turn_id:
             self.active_turn_id = None
 
-        logger.info(f"TURN_FAILED: {json.dumps(turn.to_log_dict())}")
+        log_interview_event(
+            event_name="turn.failed",
+            interview_token=self.token,
+            source="turn_orchestrator",
+            turn_id=str(turn_id),
+            outcome="failed",
+            error_code=error_code,
+            error_message=error_message,
+            details=turn.to_log_dict(),
+            openai_response_id=response_id
+        )
         return turn
 
     def get_active_turn(self) -> Optional[TurnContext]:
@@ -318,10 +354,18 @@ class RealtimeTurnOrchestrator:
             is_natural_end=(turn.turn_kind == TurnKind.CLOSING_PROMPT)
         )
 
-        logger.info(f"TURN_TRANSITION_APPLIED: turn_id={turn.turn_id}, "
-                   f"stage={transition.new_stage.value}, "
-                   f"question_order={transition.new_question_order}, "
-                   f"advance_main={transition.advance_main_completed}")
+        log_interview_event(
+            event_name="turn.transition_applied",
+            interview_token=self.token,
+            source="turn_orchestrator",
+            turn_id=str(turn.turn_id),
+            stage=transition.new_stage.value,
+            question_order=transition.new_question_order,
+            details={
+                "advance_main": transition.advance_main_completed,
+                "is_natural_end": transition.is_natural_end
+            }
+        )
 
         return transition
 

@@ -59,6 +59,11 @@ const InterviewPage: React.FC = () => {
   const [isAgentSpeaking, setIsAgentSpeaking] = useState(false);
   const isAgentSpeakingRef = useRef(false);
 
+  // Gates for opening and closing
+  const [hasReceivedFirstAiResponse, setHasReceivedFirstAiResponse] = useState(false);
+  const hasReceivedFirstAiResponseRef = useRef(false);
+  const interviewEndedRef = useRef(false);
+
   const wsRef = useRef<WebSocket | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const processorRef = useRef<ScriptProcessorNode | null>(null);
@@ -181,9 +186,12 @@ const InterviewPage: React.FC = () => {
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
-      ws.onopen = async () => {
-        setStatus('connected');
-        console.log('[TTS] ws.onopen, AudioContext state =', audioContext.state);
+        ws.onopen = async () => {
+          setStatus('connected');
+          setHasReceivedFirstAiResponse(false);
+          hasReceivedFirstAiResponseRef.current = false;
+          interviewEndedRef.current = false;
+          console.log('[TTS] ws.onopen, AudioContext state =', audioContext.state);
         
         // Start interview timer
         setElapsedTime(0);
@@ -237,6 +245,13 @@ const InterviewPage: React.FC = () => {
           );
           setTranscript(prev => prev + delta);
         } else if (data.type === 'response.created') {
+          // Update first response flag
+          if (!hasReceivedFirstAiResponseRef.current) {
+            hasReceivedFirstAiResponseRef.current = true;
+            setHasReceivedFirstAiResponse(true);
+            console.log('[TTS] First AI response received, opening mic gate');
+          }
+
           // Preemptively set speaking flag when a new response starts by advancing nextStartTime
           if (audioContextRef.current) {
             // Pre-lock for 1.5 seconds to cover initial processing/first chunk arrival
@@ -251,6 +266,7 @@ const InterviewPage: React.FC = () => {
           console.log('[TTS] New response.created, reset audio chunk counter');
         } else if (data.type === 'interview.natural_end') {
           console.log('[WS] Interview natural end received');
+          interviewEndedRef.current = true;
           // Start 15s countdown
           setCountdown(15);
           const timer = setInterval(() => {
@@ -299,8 +315,8 @@ const InterviewPage: React.FC = () => {
           
           const now = audioContextRef.current.currentTime;
           // Strategy A: Time-based gating. 
-          // Block if current time is before scheduled audio ends + 0.2s safety buffer
-          const isActuallySpeaking = now < (nextStartTimeRef.current + 0.1);
+          // Block if current time is before scheduled audio ends + 0.0s safety buffer
+          const isActuallySpeaking = now < (nextStartTimeRef.current + 0.0);
           
           // Update state only on change to avoid re-renders
           if (isActuallySpeaking !== isAgentSpeakingRef.current) {
@@ -324,6 +340,17 @@ const InterviewPage: React.FC = () => {
             console.log('[MIC] onaudioprocess rms =', rms, 'frame =', frameCount, 'isAgentSpeaking =', isActuallySpeaking, 'now =', now, 'nextStart =', nextStartTimeRef.current);
           }
           
+          // Gate 1: Block audio before the first AI response
+          if (!hasReceivedFirstAiResponseRef.current) {
+            return;
+          }
+
+          // Gate 2: Block audio after the interview has naturally ended
+          if (interviewEndedRef.current) {
+            return;
+          }
+
+          // Gate 3: Strategy A: Time-based gating (Half-duplex)
           // Skip sending audio if the agent is speaking
           if (isActuallySpeaking) {
             return;
@@ -804,6 +831,11 @@ const InterviewPage: React.FC = () => {
               </div>
 
               <p>正在通话中...</p>
+              {!hasReceivedFirstAiResponse && (
+                <p style={{ color: '#6c757d', fontSize: '0.9rem', fontWeight: 'bold' }}>
+                  请等待 AI 面试官开场...
+                </p>
+              )}
               {isAgentSpeaking && (
                 <p style={{ color: '#007bff', fontSize: '0.9rem', fontWeight: 'bold' }}>
                   AI 正在发言，请稍后再回答...

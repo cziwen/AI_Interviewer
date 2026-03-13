@@ -14,6 +14,8 @@ from ..schemas.interview import InterviewCreate, InterviewResponse, AnswerRespon
 from ..services.question_generator import generate_questions
 from ..services.stt import transcribe_audio
 from ..services.evaluator import evaluate_interview
+from ..utils.usage_tracker import InterviewUsageTracker
+from ..utils.logger import logger, log_dialogue_line
 from ..config import settings
 
 router = APIRouter()
@@ -28,12 +30,25 @@ async def process_interview_evaluation(interview_id: int):
         if not interview:
             return
 
+        usage_tracker = InterviewUsageTracker(interview_id=interview.id, interview_token=interview.link_token)
         answers = db.query(Answer).filter(Answer.interview_id == interview.id).all()
         
         # 1. Perform STT for each answer if not already done
         for answer in answers:
             if not answer.transcript and os.path.exists(answer.audio_url):
-                answer.transcript = await transcribe_audio(answer.audio_url)
+                transcript, duration = await transcribe_audio(answer.audio_url)
+                answer.transcript = transcript
+                # Record STT usage
+                usage_tracker.add_audio_usage(model_name=settings.STT_MODEL, input_seconds=duration)
+                
+                # Write to Dialogue Log
+                if transcript:
+                    log_dialogue_line(
+                        interview_token=interview.link_token,
+                        role="Candidate",
+                        text=transcript,
+                        timestamp=answer.created_at.isoformat() + "Z" if answer.created_at else None
+                    )
         
         db.commit() # Save transcripts
         
@@ -49,10 +64,20 @@ async def process_interview_evaluation(interview_id: int):
             for a in answers
         ]
         
-        evaluation = await evaluate_interview(answers_data)
+        evaluation, eval_usage = await evaluate_interview(answers_data)
         
+        # Record Eval usage
+        usage_tracker.add_text_usage(
+            model_name=settings.EVAL_LLM_MODEL,
+            input_tokens=eval_usage["input_tokens"],
+            output_tokens=eval_usage["output_tokens"]
+        )
+
         interview.evaluation_result = evaluation
         db.commit()
+
+        # Final log of all usage
+        usage_tracker.log_summary()
     except Exception as e:
         print(f"Error in background evaluation task: {e}")
     finally:
