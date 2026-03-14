@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { getInterview, completeInterview } from '../api';
+import { buildRealtimeWsUrl, getInterview, completeInterview } from '../api';
 import type { Interview } from '../types';
 
 const NO_RESPONSE_REASK_MS = 18000;
@@ -182,7 +182,7 @@ const InterviewPage: React.FC = () => {
       silentGainRef.current = silentGain;
 
       // 2. Setup WebSocket
-      const wsUrl = `ws://localhost:8000/api/realtime/ws/${token}`;
+      const wsUrl = buildRealtimeWsUrl(token);
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 

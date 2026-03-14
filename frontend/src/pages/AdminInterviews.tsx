@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import axios from 'axios';
 import { Link } from 'react-router-dom';
-import { createInterview, getJobProfiles, uploadJobProfile } from '../api';
+import { API_BASE_URL, createInterview, getJobProfiles, uploadJobProfile } from '../api';
 
 interface InterviewSummary {
   id: number;
@@ -42,7 +42,7 @@ const AdminInterviews: React.FC = () => {
 
   const fetchInterviews = () => {
     const token = localStorage.getItem('admin_token');
-    axios.get('http://localhost:8000/api/admin/interviews', {
+    axios.get(`${API_BASE_URL}/admin/interviews`, {
       headers: { Authorization: `Bearer ${token}` }
     })
     .then(res => setInterviews(res.data))
@@ -126,7 +126,7 @@ const AdminInterviews: React.FC = () => {
     
     const token = localStorage.getItem('admin_token');
     try {
-      await axios.delete(`http://localhost:8000/api/admin/interviews/${id}`, {
+      await axios.delete(`${API_BASE_URL}/admin/interviews/${id}`, {
         headers: { Authorization: `Bearer ${token}` }
       });
       setInterviews(interviews.filter(i => i.id !== id));

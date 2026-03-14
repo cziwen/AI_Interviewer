@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import axios from 'axios';
+import { API_BASE_URL } from '../api';
 
 const AdminInterviewDetail: React.FC = () => {
   const { id } = useParams<{ id: string }>();
@@ -11,7 +12,7 @@ const AdminInterviewDetail: React.FC = () => {
 
   useEffect(() => {
     const token = localStorage.getItem('admin_token');
-    axios.get(`http://localhost:8000/api/admin/interviews/${id}`, {
+    axios.get(`${API_BASE_URL}/admin/interviews/${id}`, {
       headers: { Authorization: `Bearer ${token}` }
     })
     .then(res => setData(res.data))

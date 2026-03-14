@@ -1,7 +1,22 @@
 import axios from 'axios';
 import type { Interview, AnswerResponse } from '../types';
 
-const API_BASE_URL = 'http://localhost:8000/api';
+const DEFAULT_API_BASE_URL = 'http://localhost:8000/api';
+const RAW_API_BASE_URL = import.meta.env.VITE_API_BASE_URL || DEFAULT_API_BASE_URL;
+
+export const API_BASE_URL = RAW_API_BASE_URL.replace(/\/+$/, '');
+
+export const getApiOrigin = (): string => {
+  return API_BASE_URL.replace(/\/api$/, '');
+};
+
+export const buildRealtimeWsUrl = (token: string): string => {
+  const origin = getApiOrigin();
+  const wsOrigin = origin.startsWith('https://')
+    ? origin.replace(/^https:\/\//, 'wss://')
+    : origin.replace(/^http:\/\//, 'ws://');
+  return `${wsOrigin}/api/realtime/ws/${token}`;
+};
 
 const api = axios.create({
   baseURL: API_BASE_URL,

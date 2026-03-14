@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import axios from 'axios';
+import { API_BASE_URL } from '../api';
 
 const AdminLogin: React.FC = () => {
   const [username, setUsername] = useState('');
@@ -15,7 +16,7 @@ const AdminLogin: React.FC = () => {
       formData.append('username', username);
       formData.append('password', password);
       
-      const response = await axios.post('http://localhost:8000/api/admin/login', formData);
+      const response = await axios.post(`${API_BASE_URL}/admin/login`, formData);
       localStorage.setItem('admin_token', response.data.access_token);
       navigate('/admin/interviews');
     } catch (err) {
