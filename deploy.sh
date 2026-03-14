@@ -112,8 +112,25 @@ install_docker_if_needed() {
 }
 
 start_docker_service() {
-  log "Enabling and starting docker service ..."
-  $SUDO systemctl enable --now docker
+  if $SUDO systemctl cat docker.service >/dev/null 2>&1; then
+    log "Enabling and starting docker service ..."
+    $SUDO systemctl enable --now docker
+    return
+  fi
+
+  if $SUDO systemctl cat podman.socket >/dev/null 2>&1; then
+    log "docker.service not found; enabling and starting podman.socket ..."
+    $SUDO systemctl enable --now podman.socket
+    return
+  fi
+
+  if $SUDO systemctl cat podman.service >/dev/null 2>&1; then
+    log "docker.service not found; enabling and starting podman.service ..."
+    $SUDO systemctl enable --now podman.service
+    return
+  fi
+
+  die "Neither docker.service nor podman.socket/podman.service found. Please install Docker or Podman."
 }
 
 install_compose_if_needed() {
