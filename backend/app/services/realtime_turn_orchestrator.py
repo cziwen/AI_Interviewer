@@ -86,6 +86,7 @@ class TurnPlan:
     control_instruction: str
     advance_main_completed: bool = False
     next_followups_used: int = 0
+    next_clarifies_used: int = 0
 
     def to_log_dict(self) -> dict:
         """Convert to dictionary for logging"""
@@ -107,6 +108,7 @@ class BusinessTransition:
     new_expected_reply: Optional[str]
     advance_main_completed: bool
     new_followups_used: int
+    new_clarifies_used: int = 0
     is_natural_end: bool = False
 
 
@@ -359,6 +361,7 @@ class RealtimeTurnOrchestrator:
             new_expected_reply=plan.expected_reply_after_completion,
             advance_main_completed=plan.advance_main_completed,
             new_followups_used=plan.next_followups_used,
+            new_clarifies_used=plan.next_clarifies_used,
             is_natural_end=(turn.turn_kind == TurnKind.CLOSING_PROMPT)
         )
 

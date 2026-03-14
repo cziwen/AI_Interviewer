@@ -164,4 +164,4 @@ Thumbs.db
 *.backup
 
 # Media / Uploads
-backend/app/static/uploads/
+*.wav
