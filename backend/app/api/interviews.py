@@ -41,14 +41,8 @@ async def process_interview_evaluation(interview_id: int):
                 # Record STT usage
                 usage_tracker.add_audio_usage(model_name=settings.STT_MODEL, input_seconds=duration)
                 
-                # Write to Dialogue Log
-                if transcript:
-                    log_dialogue_line(
-                        interview_token=interview.link_token,
-                        role="Candidate",
-                        text=transcript,
-                        timestamp=answer.created_at.isoformat() + "Z" if answer.created_at else None
-                    )
+                # Dialogue Log is now handled in real-time in realtime.py
+                # No need to log here to avoid duplicates and ensure chronological order
         
         db.commit() # Save transcripts
         

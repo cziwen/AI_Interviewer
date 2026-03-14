@@ -65,7 +65,37 @@ EOF
 uvicorn app.main:app --reload
 ```
 
-### 3. 前端启动
+### 3. 生产环境部署 (推荐 20+ 并发)
+
+对于生产环境或高并发场景（如 20 人同时面试），建议使用 `gunicorn` 配合 `uvicorn` worker。
+
+**启动命令示例 (2vCPU 推荐)**：
+```bash
+gunicorn -k uvicorn.workers.UvicornWorker -w 2 --threads 4 --worker-connections 1000 app.main:app --bind 0.0.0.0:8000
+```
+
+**关键配置说明**：
+- `-w 2`: 启动 2 个 worker 进程（建议设为 CPU 核心数）。
+- `--threads 4`: 每个 worker 的线程数，用于处理 `asyncio.to_thread` 抛出的阻塞 IO（如音频落盘）。
+- `--worker-connections 1000`: 每个 worker 支持的最大并发连接数。
+
+**Nginx 反向代理配置 (WebSocket 支持)**：
+如果前置 Nginx，请确保包含以下配置以支持 WebSocket 长连接：
+```nginx
+location /api/realtime/ws/ {
+    proxy_pass http://backend_upstream;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "Upgrade";
+    proxy_set_header Host $host;
+    
+    # 延长超时时间，防止面试中途断连
+    proxy_read_timeout 3600s;
+    proxy_send_timeout 3600s;
+}
+```
+
+### 4. 前端启动
 
 ```bash
 cd frontend
@@ -77,7 +107,7 @@ npm install
 npm run dev
 ```
 
-### 4. 访问系统
+### 5. 访问系统
 
 - **候选人面试页**：`http://localhost:5173/interview/{token}` （由 HR 创建后分享）
 - **HR 管理后台**：`http://localhost:5173/admin/login`

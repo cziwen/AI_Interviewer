@@ -4,10 +4,10 @@ import asyncio
 import websockets
 import wave
 import io
-from typing import Optional
+from typing import Optional, Any
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
 from sqlalchemy.orm import Session
-from ..database import get_db
+from ..database import get_db, SessionLocal
 from ..models.interview import Interview, InterviewStatus
 from ..models.job_profile import JobProfile
 from ..models.answer import Answer
@@ -27,13 +27,76 @@ import os
 import secrets
 import time
 import re
+import logging
+import openai
 
 router = APIRouter()
+
+# Global registry for active interview tokens to prevent duplicate sessions
+active_interview_tokens = set()
+active_tokens_lock = asyncio.Lock()
 
 OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime?model=gpt-realtime-mini"
 
 # 候选人长时间未回答时，等待多少秒后由 AI 重新提问或提醒
 NO_RESPONSE_REASK_SECONDS = 18
+TRANSCRIPT_WAIT_MAX_MS = 1200
+TRANSCRIPT_WAIT_POLL_MS = 50
+DECISION_ACTIONS = {
+    "followup",
+    "next_question",
+    "answer_candidate_question",
+    "clarify",
+    "finish_interview",
+}
+
+def _persist_audio_and_answer_sync(
+    pcm_data: bytes, 
+    interview_id: int, 
+    token: str, 
+    answer_question_index: int, 
+    transcript: Optional[str]
+) -> str:
+    """
+    Synchronous helper to save audio file and record answer in DB.
+    Designed to be run in a separate thread.
+    """
+    db = SessionLocal()
+    try:
+        # 1. WAV conversion
+        wav_data = pcm16_to_wav(pcm_data)
+
+        # 2. Save to file
+        file_name = f"{token}_{answer_question_index}_{secrets.token_hex(4)}.wav"
+        file_path = os.path.join(settings.UPLOAD_DIR, file_name)
+        with open(file_path, "wb") as f:
+            f.write(wav_data)
+
+        # 3. DB record
+        db_answer = Answer(
+            interview_id=interview_id,
+            question_index=answer_question_index,
+            audio_url=file_path,
+            transcript=transcript
+        )
+        db.add(db_answer)
+        db.commit()
+        return file_path
+    except Exception as e:
+        db.rollback()
+        log_interview_event(
+            event_name="answer.persist_failed",
+            interview_id=interview_id,
+            interview_token=token,
+            level=logging.ERROR,
+            source="api.realtime",
+            outcome="failed",
+            error_message=str(e),
+            details={"question_index": answer_question_index},
+        )
+        raise
+    finally:
+        db.close()
 
 def pcm16_to_wav(pcm_data: bytes, sample_rate: int = 24000, channels: int = 1) -> bytes:
     """
@@ -47,76 +110,134 @@ def pcm16_to_wav(pcm_data: bytes, sample_rate: int = 24000, channels: int = 1) -
             wav_file.writeframes(pcm_data)
         return wav_io.getvalue()
 
+
+def _clamp_text(raw: str, max_chars: int) -> str:
+    text = (raw or "").strip()
+    if max_chars <= 0:
+        return text
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars]
+
+
+def _parse_and_validate_decision(
+    raw_text: str,
+    allowed_actions: Optional[set[str]] = None,
+) -> tuple[Optional[dict], Optional[str]]:
+    """Validate decision JSON and return (decision, error_reason)."""
+    text = (raw_text or "").strip()
+    if not text:
+        return None, "empty_output"
+    try:
+        payload = json.loads(text)
+    except Exception:
+        return None, "invalid_json"
+
+    if not isinstance(payload, dict):
+        return None, "invalid_json_shape"
+
+    action = str(payload.get("action") or "").strip()
+    reason = str(payload.get("reason") or "").strip()
+    if action not in DECISION_ACTIONS:
+        return None, "invalid_action"
+    if allowed_actions is not None and action not in allowed_actions:
+        return None, "action_not_allowed"
+    if not reason:
+        return None, "missing_reason"
+
+    return {"action": action, "reason": reason}, None
+
+
+def _decision_action_to_turn_kind(action: str) -> Optional[TurnKind]:
+    mapping = {
+        "followup": TurnKind.FOLLOWUP_PROMPT,
+        "next_question": TurnKind.MAIN_PROMPT,
+        "answer_candidate_question": TurnKind.HR_REDIRECT_PROMPT,
+        "clarify": TurnKind.REASK_PROMPT,
+        "finish_interview": TurnKind.CLOSING_PROMPT,
+    }
+    return mapping.get(action)
+
 @router.websocket("/ws/{token}")
 async def realtime_interview_endpoint(websocket: WebSocket, token: str, db: Session = Depends(get_db)):
-    interview = db.query(Interview).filter(Interview.link_token == token).first()
-    if not interview:
-        logger.warning(f"WebSocket connection attempt with invalid token: {token}")
-        await websocket.close(code=4004)
-        return
-
-    await websocket.accept()
-    log_interview_event(
-        event_name="ws.connected",
-        interview_id=interview.id,
-        interview_token=token,
-        source="api.realtime",
-        stage="intro",
-        details={
-            "candidate_name": interview.name,
-            "position": interview.position
-        }
-    )
-
-    # Fetch JobProfile if available to get JD metadata
-    jd_info = "暂无详细岗位要求"
-    main_question_count = 3
-    followup_limit = 1
-    expected_duration = 10
-
-    job_profile = db.query(JobProfile).filter(JobProfile.position_name == interview.position).first()
-    if job_profile:
-        jd_data = job_profile.jd_data
-        main_question_count = jd_data.get('main_question_count', 3)
-        followup_limit = jd_data.get('followup_limit_per_question', 1)
-        expected_duration = jd_data.get('expected_duration_minutes', 10)
-
-        # Create a summary of JD
-        jd_summary = []
-        if 'responsibilities' in jd_data:
-            jd_summary.append(f"岗位职责: {jd_data['responsibilities']}")
-        if 'requirements' in jd_data:
-            jd_summary.append(f"任职要求: {jd_data['requirements']}")
-        if 'plus' in jd_data:
-            jd_summary.append(f"加分项: {jd_data['plus']}")
-
-        if jd_summary:
-            jd_info = "\n".join(jd_summary)
-
-    # Initialize Turn Orchestrator
-    orchestrator = RealtimeTurnOrchestrator(
-        token=token,
-        candidate_name=interview.name or '候选人',
-        position=interview.position or '基础岗位'
-    )
-
-    # Initialize Usage Tracker
-    usage_tracker = InterviewUsageTracker(interview_id=interview.id, interview_token=token)
-
-    # Connect to OpenAI Realtime
-    headers = {
-        "Authorization": f"Bearer {settings.OPENAI_API_KEY}",
-        "OpenAI-Beta": "realtime=v1"
-    }
+    # 1. Check for duplicate session for this token
+    async with active_tokens_lock:
+        if token in active_interview_tokens:
+            logger.warning(f"Duplicate WebSocket connection attempt for token: {token}. Rejecting.")
+            await websocket.close(code=4003, reason="Duplicate session")
+            return
+        active_interview_tokens.add(token)
 
     try:
-        log_interview_event(
-            event_name="openai.connecting",
-            interview_id=interview.id,
-            interview_token=token,
-            source="api.realtime"
-        )
-        async with websockets.connect(OPENAI_REALTIME_URL, additional_headers=headers) as openai_ws:
+            interview = db.query(Interview).filter(Interview.link_token == token).first()
+            if not interview:
+                logger.warning(f"WebSocket connection attempt with invalid token: {token}")
+                await websocket.close(code=4004)
+                return
+
+            await websocket.accept()
+
+            log_interview_event(
+                event_name="ws.connected",
+                interview_id=interview.id,
+                interview_token=token,
+                source="api.realtime",
+                stage="intro",
+                details={
+                    "candidate_name": interview.name,
+                    "position": interview.position
+                }
+            )
+
+            # Fetch JobProfile if available to get JD metadata
+            jd_info = "暂无详细岗位要求"
+            main_question_count = 3
+            followup_limit = 1
+            expected_duration = 10
+
+            job_profile = db.query(JobProfile).filter(JobProfile.position_name == interview.position).first()
+            if job_profile:
+                jd_data = job_profile.jd_data
+                main_question_count = jd_data.get('main_question_count', 3)
+                followup_limit = jd_data.get('followup_limit_per_question', 1)
+                expected_duration = jd_data.get('expected_duration_minutes', 10)
+
+                # Create a summary of JD
+                jd_summary = []
+                if 'responsibilities' in jd_data:
+                    jd_summary.append(f"岗位职责: {jd_data['responsibilities']}")
+                if 'requirements' in jd_data:
+                    jd_summary.append(f"任职要求: {jd_data['requirements']}")
+                if 'plus' in jd_data:
+                    jd_summary.append(f"加分项: {jd_data['plus']}")
+
+                if jd_summary:
+                    jd_info = "\n".join(jd_summary)
+
+            # Initialize Turn Orchestrator
+            orchestrator = RealtimeTurnOrchestrator(
+                token=token,
+                candidate_name=interview.name or '候选人',
+                position=interview.position or '基础岗位'
+            )
+
+            # Initialize Usage Tracker
+            usage_tracker = InterviewUsageTracker(interview_id=interview.id, interview_token=token)
+            decision_client = openai.AsyncOpenAI(api_key=settings.OPENAI_API_KEY) if settings.OPENAI_API_KEY else None
+
+            # Connect to OpenAI Realtime
+            headers = {
+                "Authorization": f"Bearer {settings.OPENAI_API_KEY}",
+                "OpenAI-Beta": "realtime=v1"
+            }
+
+            log_interview_event(
+                event_name="openai.connecting",
+                interview_id=interview.id,
+                interview_token=token,
+                source="api.realtime"
+            )
+            openai_ws = await websockets.connect(OPENAI_REALTIME_URL, additional_headers=headers)
             log_interview_event(
                 event_name="openai.connected",
                 interview_id=interview.id,
@@ -221,12 +342,11 @@ async def realtime_interview_endpoint(websocket: WebSocket, token: str, db: Sess
 
             # Pending plan (created after speech_stopped, applied on turn completion)
             pending_plan: Optional[TurnPlan] = None
+            recent_dialogue_turns: list[dict[str, str]] = []
 
-            def log_turn_state(event: str, extra: dict = None):
-                """Enhanced logging with turn context"""
+            def log_turn_state(event: str, extra: dict = None, **kwargs):
+                """Enhanced logging with turn context. kwargs are passed through to log_interview_event (e.g. duration_ms)."""
                 active_turn = orchestrator.get_active_turn()
-                
-                # Interview Log Schema
                 log_interview_event(
                     event_name=event,
                     interview_id=interview.id,
@@ -235,13 +355,13 @@ async def realtime_interview_endpoint(websocket: WebSocket, token: str, db: Sess
                     stage=current_stage.value,
                     turn_id=active_turn.turn_id if active_turn else None,
                     details=extra,
-                    # Additional schema fields
                     question_order=current_main_question_order,
                     main_completed_count=main_questions_completed,
                     followups_used=followups_used_for_current,
                     expected_reply=expected_candidate_reply_for,
                     overtime_mode=overtime_mode,
-                    turn_status=active_turn.status.value if active_turn else None
+                    turn_status=active_turn.status.value if active_turn else None,
+                    **kwargs
                 )
 
             log_turn_state("INTERVIEW_SESSION_START", {
@@ -252,6 +372,7 @@ async def realtime_interview_endpoint(websocket: WebSocket, token: str, db: Sess
                 "followup_limit": followup_limit,
                 "expected_duration": expected_duration
             })
+            logger.info("Interview started: id=%s, token=%s", interview.id, token)
 
             def get_main_question(order: int):
                 if order <= 0 or order > len(ordered_questions):
@@ -318,7 +439,21 @@ async def realtime_interview_endpoint(websocket: WebSocket, token: str, db: Sess
                     "结束后不要再提出新问题。"
                 )
 
-            def plan_next_turn_after_candidate_input() -> Optional[TurnPlan]:
+            def build_hr_redirect_instruction() -> str:
+                if settings.REALTIME_STRICT_PROMPT_ENABLED:
+                    return (
+                        "[INTERVIEW_STAGE] qa_redirect\n"
+                        "[INSTRUCTION] 候选人提出了流程/岗位/HR相关问题。请先用一句话简短回答："
+                        "本次面试仅作为能力评估，关于公司文化、薪资、制度等后续会由 HR 或人工面试官处理。"
+                        "随后立刻回到当前面试问题，要求候选人继续回答。"
+                    )
+                return (
+                    "候选人刚才在提问。请先简短回应：本次面试仅作为能力评估，"
+                    "公司文化、薪资、制度等问题后续由 HR 或人工面试官处理。"
+                    "然后立即把话题拉回当前问题，请候选人继续回答。"
+                )
+
+            def legacy_rule_plan_next_turn_after_candidate_input() -> Optional[TurnPlan]:
                 """Plan the next turn based on current state (not yet committed)"""
                 nonlocal overtime_mode, overtime_closing_sent
 
@@ -327,7 +462,7 @@ async def realtime_interview_endpoint(websocket: WebSocket, token: str, db: Sess
 
                 # Check for overtime
                 if elapsed >= time_budget_sec and not overtime_mode:
-                    logger.info(f"Interview reached time budget ({elapsed:.1f}s). Entering overtime mode.")
+                    log_turn_state("INTERVIEW_OVERTIME_ENTERED", {"elapsed_seconds": round(elapsed, 1)})
                     overtime_mode = True
 
                 # Check for hard timeout
@@ -401,26 +536,17 @@ async def realtime_interview_endpoint(websocket: WebSocket, token: str, db: Sess
                     advance_main = (expected_candidate_reply_for == "main")
                     next_completed = main_questions_completed + (1 if advance_main else 0)
 
-                    # Check if all main questions are completed
-                    if next_completed >= main_count_target:
-                        # All main questions completed
-                        return TurnPlan(
-                            turn_kind=TurnKind.CLOSING_PROMPT,
-                            stage_after_completion=InterviewStage.CLOSING,
-                            question_order_after_completion=current_main_question_order,
-                            expected_reply_after_completion=None,
-                            control_instruction=build_closing_instruction(),
-                            advance_main_completed=advance_main,
-                            next_followups_used=0
-                        )
+                    # 1. Check if we should do a FOLLOWUP for the CURRENT question
+                    # This must happen BEFORE checking if we should close, so the last question can have followups.
+                    can_followup = (
+                        advance_main and
+                        followups_used_for_current < followup_limit and
+                        current_main_question_order > 0 and
+                        expected_duration > 0 and
+                        elapsed_ratio <= 0.95
+                    )
 
-                    # If we just got a main answer, consider followup
-                    # BUT ONLY if we haven't used all followups for this question
-                    elif (advance_main and
-                          followups_used_for_current < followup_limit and
-                          current_main_question_order > 0 and
-                          expected_duration > 0 and
-                          elapsed_ratio <= 0.95):
+                    if can_followup:
                         # Do a followup for the current main question
                         return TurnPlan(
                             turn_kind=TurnKind.FOLLOWUP_PROMPT,
@@ -432,9 +558,64 @@ async def realtime_interview_endpoint(websocket: WebSocket, token: str, db: Sess
                             next_followups_used=followups_used_for_current + 1
                         )
 
-                    # If we just got a followup answer OR we can't do more followups
-                    # Move to the next main question
-                    elif expected_candidate_reply_for == "followup" or advance_main:
+                    # 2. Check if all main questions are completed
+                    if next_completed >= main_count_target:
+                        # Before closing, check if the last answer was substantive (Answer Gate)
+                        if advance_main:
+                            user_transcript = orchestrator.get_user_transcript(current_input_item_id) if current_input_item_id else ""
+                            is_substantive = True
+                            gate_reason = None
+                            
+                            if not user_transcript:
+                                is_substantive = False
+                                gate_reason = "empty_transcript"
+                            else:
+                                clean_text = re.sub(r"[，。！？；、,.!?;:\s（）()]+", "", user_transcript)
+                                if len(clean_text) < settings.REALTIME_MIN_MAIN_ANSWER_CHARS:
+                                    is_substantive = False
+                                    gate_reason = f"too_short({len(clean_text)})"
+                                
+                                confirm_words = [w.strip() for w in settings.REALTIME_MAIN_ANSWER_CONFIRM_WORDS.split(",") if w.strip()]
+                                if clean_text in confirm_words:
+                                    is_substantive = False
+                                    gate_reason = "confirm_word_only"
+
+                            if not is_substantive:
+                                log_turn_state("CLOSING_BLOCKED_BY_ANSWER_GATE", {
+                                    "reason": gate_reason,
+                                    "transcript": user_transcript,
+                                    "target_q": current_main_question_order
+                                })
+                                # Re-ask the current main question instead of closing
+                                question = get_main_question(current_main_question_order) or {}
+                                return TurnPlan(
+                                    turn_kind=TurnKind.REASK_PROMPT,
+                                    stage_after_completion=InterviewStage.QA,
+                                    question_order_after_completion=current_main_question_order,
+                                    expected_reply_after_completion="main",
+                                    control_instruction=(
+                                        f"[INTERVIEW_STAGE] qa_main_retry\n"
+                                        f"[INSTRUCTION] 刚才的回答比较简短。请围绕第{current_main_question_order}题补充更多细节：\n"
+                                        f"{question.get('question_text', '').strip()}\n"
+                                        f"你可以从具体案例、实施过程或遇到的挑战等方面进行补充。"
+                                    ),
+                                    advance_main_completed=False, # Stay on current question
+                                    next_followups_used=followups_used_for_current
+                                )
+
+                        # All main questions completed and passed gate
+                        return TurnPlan(
+                            turn_kind=TurnKind.CLOSING_PROMPT,
+                            stage_after_completion=InterviewStage.CLOSING,
+                            question_order_after_completion=current_main_question_order,
+                            expected_reply_after_completion=None,
+                            control_instruction=build_closing_instruction(),
+                            advance_main_completed=advance_main,
+                            next_followups_used=0
+                        )
+
+                    # 3. Move to the next main question
+                    if expected_candidate_reply_for == "followup" or advance_main:
                         # Move to next main question
                         next_order = next_completed + 1
                         return TurnPlan(
@@ -461,12 +642,345 @@ async def realtime_interview_endpoint(websocket: WebSocket, token: str, db: Sess
 
                 return None
 
+            def _add_dialogue_turn(role: str, text: str) -> None:
+                snippet = _clamp_text(text, 500)
+                if not snippet:
+                    return
+                recent_dialogue_turns.append({"role": role, "text": snippet})
+                max_entries = max(settings.REALTIME_DECISION_HISTORY_TURNS * 2, 4)
+                if len(recent_dialogue_turns) > max_entries:
+                    del recent_dialogue_turns[:-max_entries]
+
+            async def wait_for_user_transcript(item_id: Optional[str]) -> str:
+                """
+                Wait briefly for the latest user transcript so decision layer can
+                consume fresh candidate content instead of stale history.
+                """
+                if not item_id:
+                    return ""
+
+                existing = orchestrator.get_user_transcript(item_id) or ""
+                if existing:
+                    return existing
+
+                started = time.time()
+                timeout_sec = max(TRANSCRIPT_WAIT_MAX_MS, 0) / 1000.0
+                poll_sec = max(TRANSCRIPT_WAIT_POLL_MS, 10) / 1000.0
+                deadline = started + timeout_sec
+
+                while time.time() < deadline:
+                    await asyncio.sleep(poll_sec)
+                    transcript = orchestrator.get_user_transcript(item_id) or ""
+                    if transcript:
+                        waited_ms = int((time.time() - started) * 1000)
+                        log_turn_state("USER_TRANSCRIPT_READY_BEFORE_DECISION", {
+                            "item_id": item_id,
+                            "waited_ms": waited_ms,
+                            "chars": len(transcript),
+                        })
+                        return transcript
+
+                waited_ms = int((time.time() - started) * 1000)
+                log_turn_state("USER_TRANSCRIPT_WAIT_TIMEOUT", {
+                    "item_id": item_id,
+                    "waited_ms": waited_ms,
+                })
+                return ""
+
+            def get_allowed_decision_actions() -> set[str]:
+                actions = {"answer_candidate_question", "clarify"}
+                can_finish_now = (
+                    main_count_target <= 0 or
+                    main_questions_completed >= main_count_target
+                )
+                if current_stage == InterviewStage.INTRO:
+                    actions.add("next_question")
+                elif current_stage == InterviewStage.QA:
+                    actions.add("next_question")
+                    if current_main_question_order > 0:
+                        actions.add("followup")
+                elif current_stage == InterviewStage.CLOSING and can_finish_now:
+                    actions.add("finish_interview")
+
+                if can_finish_now:
+                    actions.add("finish_interview")
+                return actions
+
+            def build_decision_context(latest_candidate_utterance: str) -> dict[str, Any]:
+                history_turns = max(settings.REALTIME_DECISION_HISTORY_TURNS, 1)
+                max_chars = max(settings.REALTIME_DECISION_MAX_CHARS, 200)
+                current_question = get_main_question(current_main_question_order) if current_main_question_order > 0 else None
+                recent_pairs = recent_dialogue_turns[-(history_turns * 2):]
+                recent_summary = [
+                    f"{item.get('role', 'Unknown')}: {item.get('text', '')}"
+                    for item in recent_pairs
+                    if item.get("text")
+                ]
+                remaining_main_questions = max(main_count_target - main_questions_completed, 0)
+                return {
+                    "stage": current_stage.value,
+                    "question_order": current_main_question_order,
+                    "question_text": (current_question or {}).get("question_text", ""),
+                    "expected_reply_for": expected_candidate_reply_for,
+                    "latest_candidate_utterance": _clamp_text(latest_candidate_utterance, max_chars),
+                    "recent_dialogue_summary": "\n".join(recent_summary),
+                    "main_questions_completed": main_questions_completed,
+                    "main_count_target": main_count_target,
+                    "remaining_main_questions": remaining_main_questions,
+                    "can_finish_now": remaining_main_questions <= 0,
+                    "followups_used_for_current": followups_used_for_current,
+                    "followup_limit": followup_limit,
+                    "allowed_actions": sorted(get_allowed_decision_actions()),
+                }
+
+            async def call_decision_llm(context: dict[str, Any]) -> tuple[Optional[dict], Optional[str], int]:
+                if not decision_client:
+                    return None, "api_key_missing", 0
+
+                timeout_sec = max(settings.REALTIME_DECISION_TIMEOUT_MS, 200) / 1000.0
+                start_ts = time.time()
+                system_prompt = (
+                    "你是面试流程控制器决策层。"
+                    "你只负责判断下一步动作，不要生成面试话术。"
+                    "必须只输出 JSON 对象，格式为 {\"action\":...,\"reason\":...}。"
+                    "action 必须从 allowed_actions 中选择。"
+                    "当 remaining_main_questions > 0 时，禁止选择 finish_interview。"
+                )
+                user_prompt = (
+                    "当前面试状态如下：\n"
+                    f"- 当前阶段: {context.get('stage')}\n"
+                    f"- 当前问题序号: {context.get('question_order')}\n"
+                    f"- 当前问题: {context.get('question_text')}\n"
+                    f"- 期望候选人回复类型: {context.get('expected_reply_for')}\n"
+                    f"- 已完成主问题数: {context.get('main_questions_completed')}\n"
+                    f"- 主问题目标数: {context.get('main_count_target')}\n"
+                    f"- 剩余主问题数: {context.get('remaining_main_questions')}\n"
+                    f"- 当前是否允许结束: {context.get('can_finish_now')}\n"
+                    f"- 当前允许动作: {', '.join(context.get('allowed_actions') or [])}\n"
+                    f"- 候选人最新发言: {context.get('latest_candidate_utterance')}\n"
+                    f"- 最近对话摘要:\n{context.get('recent_dialogue_summary')}\n"
+                    "请根据上述信息选择最合适动作。"
+                )
+
+                try:
+                    response = await asyncio.wait_for(
+                        decision_client.chat.completions.create(
+                            model=settings.REALTIME_DECISION_MODEL,
+                            messages=[
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": user_prompt},
+                            ],
+                            response_format={"type": "json_object"},
+                            temperature=0,
+                        ),
+                        timeout=timeout_sec,
+                    )
+                    latency_ms = int((time.time() - start_ts) * 1000)
+                    raw_text = ((response.choices[0].message.content if response.choices else "") or "").strip()
+                    decision, parse_error = _parse_and_validate_decision(
+                        raw_text,
+                        allowed_actions=set(context.get("allowed_actions") or []),
+                    )
+                    if parse_error:
+                        return None, parse_error, latency_ms
+                    return decision, None, latency_ms
+                except asyncio.TimeoutError:
+                    return None, "timeout", int((time.time() - start_ts) * 1000)
+                except Exception:
+                    return None, "api_error", int((time.time() - start_ts) * 1000)
+
+            def map_decision_to_turn_plan(decision: dict[str, Any]) -> Optional[TurnPlan]:
+                action = decision.get("action")
+                decision_reason = str(decision.get("reason") or "").strip()
+                reason_suffix = f"（决策原因：{decision_reason}）" if decision_reason else ""
+
+                def build_next_question_plan() -> TurnPlan:
+                    if current_stage == InterviewStage.INTRO:
+                        if main_count_target <= 0:
+                            return TurnPlan(
+                                turn_kind=TurnKind.CLOSING_PROMPT,
+                                stage_after_completion=InterviewStage.CLOSING,
+                                question_order_after_completion=0,
+                                expected_reply_after_completion=None,
+                                control_instruction=build_closing_instruction(),
+                                advance_main_completed=False,
+                                next_followups_used=0,
+                            )
+                        return TurnPlan(
+                            turn_kind=TurnKind.MAIN_PROMPT,
+                            stage_after_completion=InterviewStage.QA,
+                            question_order_after_completion=1,
+                            expected_reply_after_completion="main",
+                            control_instruction=f"{build_main_question_instruction(1)}{reason_suffix}",
+                            advance_main_completed=False,
+                            next_followups_used=0,
+                        )
+
+                    advance_main = (expected_candidate_reply_for == "main")
+                    next_completed = main_questions_completed + (1 if advance_main else 0)
+                    if next_completed >= main_count_target:
+                        return TurnPlan(
+                            turn_kind=TurnKind.CLOSING_PROMPT,
+                            stage_after_completion=InterviewStage.CLOSING,
+                            question_order_after_completion=current_main_question_order,
+                            expected_reply_after_completion=None,
+                            control_instruction=build_closing_instruction(),
+                            advance_main_completed=advance_main,
+                            next_followups_used=0,
+                        )
+
+                    next_order = next_completed + 1
+                    return TurnPlan(
+                        turn_kind=TurnKind.MAIN_PROMPT,
+                        stage_after_completion=InterviewStage.QA,
+                        question_order_after_completion=next_order,
+                        expected_reply_after_completion="main",
+                        control_instruction=f"{build_main_question_instruction(next_order)}{reason_suffix}",
+                        advance_main_completed=advance_main,
+                        next_followups_used=0,
+                    )
+
+                if action == "finish_interview":
+                    if main_count_target > 0 and main_questions_completed < main_count_target:
+                        next_order = min(main_questions_completed + 1, main_count_target)
+                        fallback_plan = TurnPlan(
+                            turn_kind=TurnKind.MAIN_PROMPT,
+                            stage_after_completion=InterviewStage.QA,
+                            question_order_after_completion=next_order,
+                            expected_reply_after_completion="main",
+                            control_instruction=f"{build_main_question_instruction(next_order)}{reason_suffix}",
+                            advance_main_completed=False,
+                            next_followups_used=0,
+                        )
+                        log_turn_state("decision_layer.finish_blocked", {
+                            "action": action,
+                            "main_questions_completed": main_questions_completed,
+                            "main_count_target": main_count_target,
+                            "expected_reply_for": expected_candidate_reply_for,
+                            "fallback_action": "next_question",
+                        })
+                        return fallback_plan
+                    return TurnPlan(
+                        turn_kind=TurnKind.CLOSING_PROMPT,
+                        stage_after_completion=InterviewStage.CLOSING,
+                        question_order_after_completion=current_main_question_order,
+                        expected_reply_after_completion=None,
+                        control_instruction=build_closing_instruction(),
+                        advance_main_completed=False,
+                        next_followups_used=0,
+                    )
+
+                if action == "answer_candidate_question":
+                    return TurnPlan(
+                        turn_kind=TurnKind.HR_REDIRECT_PROMPT,
+                        stage_after_completion=current_stage,
+                        question_order_after_completion=current_main_question_order,
+                        expected_reply_after_completion=expected_candidate_reply_for,
+                        control_instruction=f"{build_hr_redirect_instruction()}{reason_suffix}",
+                        advance_main_completed=False,
+                        next_followups_used=followups_used_for_current,
+                    )
+
+                if action == "clarify":
+                    question = get_main_question(current_main_question_order) or {}
+                    if current_stage == InterviewStage.QA and current_main_question_order > 0:
+                        clarify_instruction = (
+                            f"[INTERVIEW_STAGE] qa_clarify\n"
+                            f"[INSTRUCTION] 候选人表示未理解问题。请重新解释并重述第{current_main_question_order}题：\n"
+                            f"{question.get('question_text', '').strip()}。"
+                            f"解释要简短清晰，然后请候选人继续回答。{reason_suffix}"
+                        )
+                        expected_reply_after = "main"
+                    else:
+                        clarify_instruction = (
+                            "候选人表示没听清。请用更简洁的话重新说明你刚才的问题，"
+                            "并等待候选人继续回答。"
+                        )
+                        expected_reply_after = expected_candidate_reply_for
+
+                    return TurnPlan(
+                        turn_kind=TurnKind.REASK_PROMPT,
+                        stage_after_completion=current_stage,
+                        question_order_after_completion=current_main_question_order,
+                        expected_reply_after_completion=expected_reply_after,
+                        control_instruction=clarify_instruction,
+                        advance_main_completed=False,
+                        next_followups_used=followups_used_for_current,
+                    )
+
+                if action == "followup":
+                    if current_stage != InterviewStage.QA or current_main_question_order <= 0:
+                        return None
+                    return TurnPlan(
+                        turn_kind=TurnKind.FOLLOWUP_PROMPT,
+                        stage_after_completion=InterviewStage.QA,
+                        question_order_after_completion=current_main_question_order,
+                        expected_reply_after_completion="followup",
+                        control_instruction=f"{build_followup_instruction(current_main_question_order)}{reason_suffix}",
+                        advance_main_completed=(expected_candidate_reply_for == "main"),
+                        next_followups_used=min(followups_used_for_current + 1, followup_limit),
+                    )
+
+                if action == "next_question":
+                    return build_next_question_plan()
+
+                return None
+
+            async def decide_next_turn_after_candidate_input() -> Optional[TurnPlan]:
+                latest_utterance = orchestrator.get_user_transcript(current_input_item_id) if current_input_item_id else ""
+                latest_utterance = latest_utterance or ""
+                if not latest_utterance:
+                    for item in reversed(recent_dialogue_turns):
+                        if item.get("role") == "Candidate" and item.get("text"):
+                            latest_utterance = item["text"]
+                            break
+                fallback_plan = legacy_rule_plan_next_turn_after_candidate_input()
+
+                if not settings.REALTIME_DECISION_LAYER_ENABLED:
+                    return fallback_plan
+
+                context = build_decision_context(latest_utterance)
+                log_turn_state("decision_layer.requested", {
+                    "input_chars": len(context.get("latest_candidate_utterance", "")),
+                    "history_chars": len(context.get("recent_dialogue_summary", "")),
+                    "allowed_actions": context.get("allowed_actions", []),
+                })
+
+                decision, error_reason, latency_ms = await call_decision_llm(context)
+                if error_reason or not decision:
+                    log_turn_state(
+                        "decision_layer.fallback",
+                        {"reason": error_reason or "unknown_error", "latency_ms": latency_ms},
+                        duration_ms=latency_ms,
+                    )
+                    return fallback_plan
+
+                plan = map_decision_to_turn_plan(decision)
+                if not plan:
+                    log_turn_state(
+                        "decision_layer.fallback",
+                        {"reason": "mapping_failed", "action": decision.get("action"), "decision_reason": decision.get("reason"), "latency_ms": latency_ms},
+                        duration_ms=latency_ms,
+                    )
+                    return fallback_plan
+
+                log_turn_state(
+                    "decision_layer.succeeded",
+                    {"action": decision.get("action"), "reason": decision.get("reason"), "latency_ms": latency_ms},
+                    duration_ms=latency_ms,
+                )
+                log_turn_state("decision_layer.mapped_to_plan", {
+                    "action": decision.get("action"),
+                    "reason": decision.get("reason"),
+                    "plan": plan.to_log_dict(),
+                })
+                return plan
+
             async def send_response_create_with_turn(plan: TurnPlan):
                 """Send response.create and create a turn"""
                 nonlocal pending_plan, current_main_question_order
 
                 if orchestrator.has_pending_turn():
-                    logger.info("Skip response.create because previous turn is still pending.")
                     log_turn_state("AI_RESPONSE_CREATE_SKIPPED", {
                         "reason": "pending_turn",
                         "plan": plan.to_log_dict() if plan else None
@@ -475,13 +989,19 @@ async def realtime_interview_endpoint(websocket: WebSocket, token: str, db: Sess
 
                 # Context Reset Logic
                 if settings.REALTIME_CONTEXT_RESET_MODE == "per_main_question":
-                    # If we are moving to a NEW main question, clear conversation history
+                    # If we are moving to a NEW main question OR entering closing, clear conversation history
                     is_new_main = (plan.turn_kind == TurnKind.MAIN_PROMPT and 
                                  plan.question_order_after_completion != current_main_question_order)
+                    is_entering_closing = (plan.turn_kind == TurnKind.CLOSING_PROMPT and current_stage != InterviewStage.CLOSING)
                     
-                    if is_new_main:
-                        logger.info(f"RESETTING_CONTEXT for new main question {plan.question_order_after_completion}")
-                        log_turn_state("CONTEXT_RESET_START", {"target_q": plan.question_order_after_completion})
+                    if is_new_main or is_entering_closing:
+                        reason = "new_main" if is_new_main else "closing"
+                        
+                        log_details = {"reason": reason}
+                        if is_new_main:
+                            log_details["target_q"] = plan.question_order_after_completion
+                            
+                        log_turn_state("CONTEXT_RESET_START", log_details)
                         
                         # Use session.update to reset or just clear items if the API supports it.
                         # For Realtime API, the most reliable way to "clear" without reconnecting 
@@ -616,7 +1136,6 @@ async def realtime_interview_endpoint(websocket: WebSocket, token: str, db: Sess
 
                 # Handle natural end
                 if transition.is_natural_end and not natural_end_sent:
-                    logger.info(f"Interview natural end reached for token {token}")
                     log_turn_state("INTERVIEW_NATURAL_END_SENT")
                     asyncio.create_task(websocket.send_text(json.dumps({"type": "interview.natural_end"})))
                     natural_end_sent = True
@@ -661,9 +1180,10 @@ async def realtime_interview_endpoint(websocket: WebSocket, token: str, db: Sess
                             await openai_ws.send(json.dumps(audio_event))
 
                         elif data.get("type") == "end_turn":
-                            logger.info(f"Client manually ended turn")
+                            log_turn_state("CLIENT_END_TURN_REQUESTED")
                             await commit_input_audio_once("client_end_turn")
-                            plan = plan_next_turn_after_candidate_input()
+                            await wait_for_user_transcript(current_input_item_id)
+                            plan = await decide_next_turn_after_candidate_input()
                             if plan:
                                 await send_response_create_with_turn(plan)
 
@@ -680,10 +1200,17 @@ async def realtime_interview_endpoint(websocket: WebSocket, token: str, db: Sess
                                     next_followups_used=followups_used_for_current
                                 )
                                 await send_response_create_with_turn(reask_plan)
-                                logger.info(f"Frontend no-response timeout triggered re-ask")
 
                 except Exception as e:
-                    logger.error(f"Client to OpenAI relay error: {e}")
+                    log_interview_event(
+                        event_name="relay.client_to_openai.error",
+                        interview_id=interview.id,
+                        interview_token=token,
+                        level=logging.ERROR,
+                        source="api.realtime",
+                        outcome="failed",
+                        error_message=str(e),
+                    )
 
             async def relay_openai_to_client():
                 nonlocal is_recording_segment, candidate_speaking, pending_plan
@@ -715,7 +1242,15 @@ async def realtime_interview_endpoint(websocket: WebSocket, token: str, db: Sess
                                             output_seconds=len(pcm_bytes) / 48000.0
                                         )
                                     except Exception as e:
-                                        logger.error(f"Failed to decode audio delta for usage tracking: {e}")
+                                        log_interview_event(
+                                            event_name="usage.audio_delta_decode_failed",
+                                            interview_id=interview.id,
+                                            interview_token=token,
+                                            level=logging.ERROR,
+                                            source="api.realtime",
+                                            outcome="failed",
+                                            error_message=str(e),
+                                        )
 
                                 if "delta" in event:
                                     modified_event = event.copy()
@@ -747,6 +1282,19 @@ async def realtime_interview_endpoint(websocket: WebSocket, token: str, db: Sess
                             await websocket.send_text(json.dumps(event))
 
                         # 3. Handle response.done with outcome classification
+                        elif event_type == "conversation.item.input_audio_transcription.completed":
+                            item_id = event.get("item_id")
+                            transcript = event.get("transcript", "")
+                            if transcript:
+                                orchestrator.set_user_transcript(item_id, transcript)
+                                # Write to Dialogue Log immediately
+                                log_dialogue_line(
+                                    interview_token=token,
+                                    role="Candidate",
+                                    text=transcript
+                                )
+                                _add_dialogue_turn("Candidate", transcript)
+
                         elif event_type == "response.done":
                             response = event.get("response", {})
                             response_id = response.get("id")
@@ -841,6 +1389,7 @@ async def realtime_interview_endpoint(websocket: WebSocket, token: str, db: Sess
                                             role="AI",
                                             text=turn.transcript
                                         )
+                                        _add_dialogue_turn("AI", turn.transcript)
 
                             elif status == "cancelled":
                                 # Turn was cancelled (e.g., turn_detected)
@@ -938,7 +1487,6 @@ async def realtime_interview_endpoint(websocket: WebSocket, token: str, db: Sess
                             # Check by audio buffer size as a proxy
                             MIN_AUDIO_BUFFER_SIZE = 5  # Minimum number of chunks
                             if len(audio_buffer) < MIN_AUDIO_BUFFER_SIZE:
-                                logger.info(f"Ignoring short speech segment (buffer size: {len(audio_buffer)} chunks)")
                                 log_turn_state("VAD_SPEECH_STOPPED_IGNORED", {
                                     "reason": "too_short",
                                     "buffer_size": len(audio_buffer)
@@ -948,39 +1496,56 @@ async def realtime_interview_endpoint(websocket: WebSocket, token: str, db: Sess
 
                             # Skip if we have a pending turn
                             if orchestrator.has_pending_turn():
-                                logger.info("Ignore speech_stopped because turn is still pending.")
                                 log_turn_state("VAD_SPEECH_STOPPED_IGNORED", {"reason": "turn_pending"})
                                 audio_buffer.clear()
                                 continue
 
                             await commit_input_audio_once("vad_speech_stopped", current_input_item_id)
 
-                            # Save audio
+                            # Save audio and record answer asynchronously
                             answer_question_index = 0
                             if expected_candidate_reply_for in ("main", "followup") and current_main_question_order > 0:
                                 answer_question_index = current_main_question_order
 
                             if audio_buffer:
                                 pcm_data = b"".join(audio_buffer)
-                                wav_data = pcm16_to_wav(pcm_data)
+                                
+                                # Offload blocking I/O to a thread
+                                try:
+                                    user_transcript = orchestrator.get_user_transcript(current_input_item_id) if current_input_item_id else None
+                                    file_path = await asyncio.to_thread(
+                                        _persist_audio_and_answer_sync,
+                                        pcm_data,
+                                        interview.id,
+                                        token,
+                                        answer_question_index,
+                                        user_transcript
+                                    )
 
-                                file_name = f"{token}_{answer_question_index}_{secrets.token_hex(4)}.wav"
-                                file_path = os.path.join(settings.UPLOAD_DIR, file_name)
-                                with open(file_path, "wb") as f:
-                                    f.write(wav_data)
-
-                                log_interview_event(
-                                    event_name="vad.segment_saved",
-                                    interview_id=interview.id,
-                                    interview_token=token,
-                                    source="api.realtime",
-                                    stage=current_stage.value,
-                                    details={
-                                        "file_path": file_path,
-                                        "question_index": answer_question_index,
-                                        "duration_ms": len(pcm_data) / 48 # 24kHz * 2 bytes = 48 bytes per ms
-                                    }
-                                )
+                                    log_interview_event(
+                                        event_name="vad.segment_saved",
+                                        interview_id=interview.id,
+                                        interview_token=token,
+                                        source="api.realtime",
+                                        stage=current_stage.value,
+                                        details={
+                                            "file_path": file_path,
+                                            "question_index": answer_question_index,
+                                            "duration_ms": len(pcm_data) / 48 # 24kHz * 2 bytes = 48 bytes per ms
+                                        }
+                                    )
+                                except Exception as e:
+                                    log_interview_event(
+                                        event_name="answer.persist_async_failed",
+                                        interview_id=interview.id,
+                                        interview_token=token,
+                                        level=logging.ERROR,
+                                        source="api.realtime",
+                                        outcome="failed",
+                                        error_message=str(e),
+                                        details={"question_index": answer_question_index},
+                                    )
+                                    # We continue with the interview even if saving failed to avoid hanging the session
 
                                 # Record audio input usage
                                 usage_tracker.add_audio_usage(
@@ -988,19 +1553,11 @@ async def realtime_interview_endpoint(websocket: WebSocket, token: str, db: Sess
                                     input_seconds=len(pcm_data) / 48000.0 # 24kHz * 2 bytes = 48000 bytes per second
                                 )
 
-                                db_answer = Answer(
-                                    interview_id=interview.id,
-                                    question_index=answer_question_index,
-                                    audio_url=file_path,
-                                    transcript=None
-                                )
-                                db.add(db_answer)
-                                db.commit()
-
                                 audio_buffer.clear()
 
                             # Plan next turn
-                            plan = plan_next_turn_after_candidate_input()
+                            await wait_for_user_transcript(current_input_item_id)
+                            plan = await decide_next_turn_after_candidate_input()
                             if plan:
                                 log_turn_state("VAD_SPEECH_STOPPED_APPLIED", {
                                     "answer_idx": answer_question_index,
@@ -1029,7 +1586,15 @@ async def realtime_interview_endpoint(websocket: WebSocket, token: str, db: Sess
                             await websocket.send_text(json.dumps(event))
 
                 except Exception as e:
-                    logger.error(f"OpenAI to Client relay error: {e}")
+                    log_interview_event(
+                        event_name="relay.openai_to_client.error",
+                        interview_id=interview.id,
+                        interview_token=token,
+                        level=logging.ERROR,
+                        source="api.realtime",
+                        outcome="failed",
+                        error_message=str(e),
+                    )
 
             # Run relays concurrently
             await asyncio.gather(relay_client_to_openai(), relay_openai_to_client())
@@ -1054,10 +1619,28 @@ async def realtime_interview_endpoint(websocket: WebSocket, token: str, db: Sess
         )
         await websocket.close(code=1011)
     finally:
+        interview_id_for_log = interview.id if "interview" in locals() else None
+        logger.info("Interview ended: id=%s, token=%s", interview_id_for_log, token)
+
+        # 2. Release token from active registry
+        async with active_tokens_lock:
+            if token in active_interview_tokens:
+                active_interview_tokens.remove(token)
+
+        # Ensure upstream websocket is closed on all paths
+        if 'openai_ws' in locals() and openai_ws and not openai_ws.closed:
+            await openai_ws.close()
+
         # Log final usage summary
         if 'usage_tracker' in locals():
             usage_tracker.log_summary()
 
         # Log final orchestrator stats
         if 'orchestrator' in locals():
-            logger.info(f"ORCHESTRATOR_STATS: {json.dumps(orchestrator.get_stats())}")
+            log_interview_event(
+                event_name="orchestrator.stats",
+                interview_id=interview_id_for_log,
+                interview_token=token,
+                source="turn_orchestrator",
+                details=orchestrator.get_stats()
+            )

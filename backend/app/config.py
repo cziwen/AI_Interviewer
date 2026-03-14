@@ -17,6 +17,13 @@ class Settings(BaseSettings):
     REALTIME_MODEL: str = os.getenv("REALTIME_MODEL", "gpt-realtime-mini")
     REALTIME_STRICT_PROMPT_ENABLED: bool = os.getenv("REALTIME_STRICT_PROMPT_ENABLED", "true").lower() == "true"
     REALTIME_CONTEXT_RESET_MODE: str = os.getenv("REALTIME_CONTEXT_RESET_MODE", "per_main_question") # none, per_main_question
+    REALTIME_MIN_MAIN_ANSWER_CHARS: int = int(os.getenv("REALTIME_MIN_MAIN_ANSWER_CHARS", "12"))
+    REALTIME_MAIN_ANSWER_CONFIRM_WORDS: str = os.getenv("REALTIME_MAIN_ANSWER_CONFIRM_WORDS", "嗯,好,可以,是的,明白,了解,好的,没问题,OK,ok")
+    REALTIME_DECISION_LAYER_ENABLED: bool = os.getenv("REALTIME_DECISION_LAYER_ENABLED", "true").lower() == "true"
+    REALTIME_DECISION_TIMEOUT_MS: int = int(os.getenv("REALTIME_DECISION_TIMEOUT_MS", "5000"))
+    REALTIME_DECISION_HISTORY_TURNS: int = int(os.getenv("REALTIME_DECISION_HISTORY_TURNS", "3"))
+    REALTIME_DECISION_MAX_CHARS: int = int(os.getenv("REALTIME_DECISION_MAX_CHARS", "1200"))
+    REALTIME_DECISION_MODEL: str = os.getenv("REALTIME_DECISION_MODEL", "gpt-4o-mini")
     
     ADMIN_USERNAME: str = os.getenv("ADMIN_USERNAME", "admin")
     ADMIN_PASSWORD: str = os.getenv("ADMIN_PASSWORD", "admin123")

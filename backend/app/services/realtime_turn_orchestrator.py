@@ -3,12 +3,11 @@ Realtime Turn Orchestrator
 Manages turn lifecycle and business state transitions for realtime interviews.
 """
 
-import json
 import time
 from dataclasses import dataclass, field
 from typing import Optional, Dict, List
 from enum import Enum
-from ..utils.logger import logger, log_interview_event
+from ..utils.logger import log_interview_event
 
 
 class TurnKind(str, Enum):
@@ -136,6 +135,9 @@ class RealtimeTurnOrchestrator:
         self.turns_cancelled = 0
         self.turns_failed = 0
 
+        # User transcript tracking
+        self.user_transcripts: Dict[str, str] = {}
+
     def next_turn_id(self) -> int:
         """Generate next turn ID"""
         self.turn_seq += 1
@@ -175,17 +177,13 @@ class RealtimeTurnOrchestrator:
     def bind_response(self, response_id: str) -> Optional[TurnContext]:
         """Bind a response.created event to the active turn"""
         if not self.active_turn_id:
-            logger.warning(f"Cannot bind response {response_id}: no active turn")
             return None
 
         turn = self.turns_by_id.get(self.active_turn_id)
         if not turn:
-            logger.error(f"Active turn {self.active_turn_id} not found in turns_by_id")
             return None
 
         if turn.response_id and turn.response_id != response_id:
-            logger.warning(f"Turn {turn.turn_id} already bound to {turn.response_id}, "
-                         f"cannot rebind to {response_id}")
             return None
 
         turn.response_id = response_id
@@ -195,7 +193,6 @@ class RealtimeTurnOrchestrator:
         # Initialize transcript buffer for this response
         self.transcript_buffers[response_id] = []
 
-        logger.info(f"TURN_RESPONSE_BOUND: turn_id={turn.turn_id}, response_id={response_id}")
         return turn
 
     def append_transcript_delta(self, response_id: str, delta: str) -> None:
@@ -208,12 +205,10 @@ class RealtimeTurnOrchestrator:
         """Mark a turn as completed"""
         turn_id = self.response_to_turn.get(response_id)
         if not turn_id:
-            logger.warning(f"Cannot complete: response {response_id} not bound to any turn")
             return None
 
         turn = self.turns_by_id.get(turn_id)
         if not turn:
-            logger.error(f"Turn {turn_id} not found")
             return None
 
         # Assemble full transcript
@@ -249,12 +244,10 @@ class RealtimeTurnOrchestrator:
         """Mark a turn as cancelled"""
         turn_id = self.response_to_turn.get(response_id)
         if not turn_id:
-            logger.warning(f"Cannot cancel: response {response_id} not bound to any turn")
             return None
 
         turn = self.turns_by_id.get(turn_id)
         if not turn:
-            logger.error(f"Turn {turn_id} not found")
             return None
 
         # Assemble partial transcript if any
@@ -282,16 +275,32 @@ class RealtimeTurnOrchestrator:
         )
         return turn
 
+    def set_user_transcript(self, item_id: str, transcript: str) -> None:
+        """Store user transcript for a conversation item"""
+        self.user_transcripts[item_id] = transcript
+        log_interview_event(
+            event_name="user_transcription.completed",
+            interview_token=self.token,
+            source="turn_orchestrator",
+            details={
+                "item_id": item_id,
+                "transcript_len": len(transcript)
+            }
+        )
+
+    def get_user_transcript(self, item_id: str) -> Optional[str]:
+        """Get user transcript for a conversation item"""
+        return self.user_transcripts.get(item_id)
+
+
     def fail_turn(self, response_id: str, error_code: str, error_message: str) -> Optional[TurnContext]:
         """Mark a turn as failed"""
         turn_id = self.response_to_turn.get(response_id) if response_id else self.active_turn_id
         if not turn_id:
-            logger.warning(f"Cannot fail: no turn associated with response {response_id}")
             return None
 
         turn = self.turns_by_id.get(turn_id)
         if not turn:
-            logger.error(f"Turn {turn_id} not found")
             return None
 
         turn.status = TurnStatus.FAILED
@@ -342,7 +351,6 @@ class RealtimeTurnOrchestrator:
     def create_business_transition(self, plan: TurnPlan, turn: TurnContext) -> Optional[BusinessTransition]:
         """Create business transition if turn completed successfully"""
         if not self.should_advance_business_state(turn):
-            logger.info(f"TURN_TRANSITION_SKIPPED: turn_id={turn.turn_id}, status={turn.status.value}")
             return None
 
         transition = BusinessTransition(

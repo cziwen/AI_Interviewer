@@ -7,7 +7,12 @@
 - **Server Log（服务器运行日志）**：关注整体服务运行状态与基础设施健康。
 - **Interview Log（面试会话日志）**：聚焦单场面试的 WebSocket / OpenAI / turn / stage 等细粒度行为。
 
-当前代码已经实现了统一的 `ai_interview` 日志器，并将所有事件写入 `backend/logs/server_*.log`。本规范在此基础上：
+当前代码已经实现统一的 `ai_interview` 日志器与 Interview Log 写入能力。当前策略为：
+
+- `log_interview_event()` 仅写入 `backend/logs/interviews/interview_token_*.log`（不再向 Server Log 写摘要）。
+- Server Log 仅保留宏观服务事件；对单场面试最多记录两条：开始与结束。
+
+本规范在此基础上：
 
 - 定义两类日志的职责边界与字段规范。
 - 约定 Interview Log 的标准结构和事件分类，为后续代码落地做设计指引。
@@ -19,6 +24,9 @@
 ### Server Log（服务器运行日志）
 
 - **关注对象**：整个平台/服务的运行态，而不是某一场具体面试。
+- **面试相关记录上限**：每场面试最多两条：
+  - `Interview started: id=..., token=...`
+  - `Interview ended: id=..., token=...`
 - **典型事件**：
   - 服务启动与关闭（FastAPI / Uvicorn 生命周期）
   - 依赖健康检查（数据库、OpenAI、存储等）
@@ -158,8 +166,8 @@ def setup_logger():
 logger = setup_logger()
 ```
 
-- **当前行为**：所有通过 `from app.utils.logger import logger` 打印的内容，都会写入 `server_*.log`。
-- **目标行为**：在保留现有 Server Log 的同时，为 Interview Log 增设独立的 handler（例如按 token / interview_id 拆分文件或输出到聚合系统）。
+- **当前行为**：`logger` 仅用于 Server 级宏观日志；`log_interview_event`/`log_dialogue_line` 负责 Interview 日志。
+- **Server 约束**：不再记录 `InterviewEvent[...]` 摘要行，避免与 Interview Log 重复。
 
 ### 日志级别策略
 
@@ -265,8 +273,14 @@ backend/
 2026-03-12T06:25:35.456Z  Candidate  我是张三，有三年后端经验...
 ```
 - **角色说明**：
-  - `AI`: AI 面试官的回复。
-  - `Candidate`: 候选人的回答（经 STT 转写）。
+  - `AI`: AI 面试官的回复（来自 Realtime `response.audio_transcript`，在 `response.done` 时写入）。
+  - `Candidate`: 候选人的回答；**Realtime 面试**下由 Realtime 的 `input_audio_transcription` 转写并在 `conversation.item.input_audio_transcription.completed` 时写入，非 Realtime 或转写缺失时由事后 STT（Whisper）补写。
+
+- **写入时机与顺序（当前实现）**：
+  - 所有对话行均在 **realtime 链路内按事件完成时间实时追加** 到 `*_dialogue.log`，不再在面试结束后批量写入。
+  - AI 行：在收到 `response.done` 且 status 为 completed 时，用当前 turn 的 transcript 写入。
+  - Candidate 行：在收到 `conversation.item.input_audio_transcription.completed` 时，用事件中的 `transcript` 写入。
+  - 顺序为**事件完成时间**。同一轮中可能先收到 `response.done` 再收到 `input_audio_transcription.completed`，故文件中可能出现「AI 行略早于对应 Candidate 行」；语义上仍是候选人先说话、AI 再回复。
 
 ---
 
@@ -307,6 +321,33 @@ else:
 - **规范建议**：
   - **Server Log**：仅记录 OpenAI 可用性相关的摘要信息（如“与 OpenAI 建立连接成功/失败”、“Reconnect 次数”等）。
   - **Interview Log**：将单场面试对应的 `session.*` / `response.*` 事件归纳为若干 **规范化事件**（例如 `openai.session.created`、`openai.response.done`），并填充 `openai_response_id` / `openai_conversation_id` 等字段，而不是原始 payload 全量输出。
+
+### 2.5 决策层事件
+
+Realtime 流程控制器使用独立文本 LLM 决策层后，将决策过程纳入 Interview Log。
+
+**当前实现**（[backend/app/api/realtime.py](../../backend/app/api/realtime.py) 内通过 `log_turn_state()` 写入）：
+
+- `decision_layer.requested`
+  - 触发时机：构建完决策上下文并准备发起独立 LLM 调用。
+  - 写入字段：`details.input_chars`、`details.history_chars`；以及 `log_turn_state` 统一带入的 `stage`、`question_order`、`main_completed_count`、`followups_used`、`expected_reply`、`overtime_mode`、`turn_status`。
+- `decision_layer.succeeded`
+  - 触发时机：拿到合法 JSON action 且成功映射为 `TurnPlan`。
+  - 写入字段：`details.action`、`details.latency_ms`，以及顶层 `duration_ms`（与 latency_ms 一致）；外加上述统一字段。
+- `decision_layer.fallback`
+  - 触发时机：决策超时、JSON 解析失败、action 非法、API 异常或映射失败（`timeout` / `invalid_json` / `invalid_action` / `api_error` / `mapping_failed`）。
+  - 写入字段：`details.reason`、`details.latency_ms`，以及顶层 `duration_ms`；若为 `mapping_failed` 则含 `details.action`；外加上述统一字段。
+- `decision_layer.mapped_to_plan`
+  - 触发时机：action 成功映射为 `TurnPlan` 后、即将返回该 plan 前。
+  - 写入字段：`details.action`、`details.plan`（仅 preview：`turn_kind`、`stage_after`、`question_order_after`、`expected_reply_after`、`advance_main`、`instruction_preview` 前 100 字）；外加上述统一字段。
+- `decision_layer.finish_blocked`
+  - 触发时机：决策层返回 `finish_interview`，但 `main_questions_completed < main_count_target` 被服务端硬拦截。
+  - 写入字段：`details.action`、`details.main_questions_completed`、`details.main_count_target`、`details.expected_reply_for`、`details.fallback_action`；外加上述统一字段。
+
+这组事件用于回答三类问题：
+- 决策层是否稳定（fallback 比例是否异常）。
+- 决策层是否带来明显延迟（latency 是否超过预算）。
+- 决策结果是否符合预期（action 到 plan 的映射是否正确）。
 
 ### 3. VAD 语音与音频处理
 
@@ -360,7 +401,7 @@ logger.info(f"Evaluation completed, score: {evaluation['overall_score']}")
   - **Interview Log**：
     - `interview.created`：带上 `interview_id` / `token` / `position_key` 等。
     - `interview.completed`：带上最终 `status`、用时等。
-    - `stt.requested` / `stt.completed`：带上音频片段标识和 STT 模型信息。
+    - `stt.requested` / `stt.completed`：仅在实际调用 Whisper/STT 时记录（Realtime 面试且已有 `input_audio_transcription` 时，多数 Answer 的 transcript 已在实时链路写入，评估阶段会跳过 STT）。
     - `evaluation.requested` / `evaluation.completed`：带上模型名和关键评分摘要。
 
 ### 5. 错误与警告
@@ -386,6 +427,8 @@ logger.error(f"Database error during interview creation: {e}")
 - **INFO 级别**（推荐默认）：
   - WebSocket 连接/断开。
   - Turn 创建/完成/失败。
+  - 决策层事件（`decision_layer.requested` / `decision_layer.succeeded` / `decision_layer.fallback` / `decision_layer.mapped_to_plan`）。
+  - 若发生提前结束拦截，还会出现 `decision_layer.finish_blocked`。
   - STT / 评估的请求与完成（摘要）。
   - 重要的 OpenAI 事件（`response.created` / `response.done` 聚合视图）。
 - **DEBUG 级别**（按 session 临时打开）：
@@ -417,6 +460,9 @@ logger.error(f"Database error during interview creation: {e}")
 {"timestamp":"2026-03-12T06:24:49.982Z","level":"INFO","event_name":"ws.connected","interview_id":42,"interview_token":"abc123","stage":"intro","outcome":"success"}
 {"timestamp":"2026-03-12T06:24:50.100Z","level":"INFO","event_name":"openai.session.created","interview_id":42,"runtime_session_id":"sess_9f8c...","outcome":"success"}
 {"timestamp":"2026-03-12T06:25:10.000Z","level":"INFO","event_name":"vad.speech_started","interview_id":42,"stage":"qa","question_order":0}
+{"timestamp":"2026-03-12T06:25:13.000Z","level":"INFO","event_name":"decision_layer.requested","interview_id":42,"interview_token":"abc123","stage":"qa","source":"turn_orchestrator","details":{"input_chars":120,"history_chars":80},"question_order":1}
+{"timestamp":"2026-03-12T06:25:13.520Z","level":"INFO","event_name":"decision_layer.succeeded","interview_id":42,"interview_token":"abc123","stage":"qa","source":"turn_orchestrator","details":{"action":"followup","latency_ms":518},"duration_ms":518,"question_order":1}
+{"timestamp":"2026-03-12T06:25:13.521Z","level":"INFO","event_name":"decision_layer.mapped_to_plan","interview_id":42,"interview_token":"abc123","stage":"qa","source":"turn_orchestrator","details":{"action":"followup","plan":{"turn_kind":"followup_prompt","stage_after":"qa","instruction_preview":"请围绕刚才这个主问题做一次简短追问..."}},"question_order":1}
 {"timestamp":"2026-03-12T06:25:13.000Z","level":"INFO","event_name":"vad.segment_saved","interview_id":42,"details":{"file_path":"uploads/abc123_0_a1b2.wav","duration_ms":3000}}
 {"timestamp":"2026-03-12T06:30:35.000Z","level":"INFO","event_name":"evaluation.completed","interview_id":42,"details":{"overall_score":85}}
 {"timestamp":"2026-03-12T06:30:40.000Z","level":"INFO","event_name":"ws.disconnected","interview_id":42,"outcome":"success"}
@@ -473,29 +519,19 @@ find logs/ -name "*.log" -mtime +30 -delete
 
 ---
 
-## 🔁 从单日志到双日志的迁移建议
+## 🔁 双通道落地约定（当前）
 
-本节描述从“当前所有日志都写入 `server_*.log`”演进到“Server Log + Interview Log 双通道”的建议步骤，仅影响后端实现，不改变对外 API。
+当前已落地为双通道策略，执行约定如下：
 
-1. **抽象统一的日志封装层**  
-   - 在后端增加一个轻量级 `log_event()` 或 `interview_log()` 工具函数，内部负责：
-     - 填充 Interview Log Schema 基础字段（`interview_id` / `token` / `stage` / `turn_id` 等）。
-     - 根据事件类型决定写入 Server Log 还是 Interview Log。
-2. **先划分事件归属，再改写调用点**  
-   - 参考本文件“关键事件与路由策略”，对每一个现有 `logger.info(...)` / `logger.error(...)` 进行标注：
-     - 纯基础设施相关 → 保留在 Server Log。
-     - 含有 `token` / `interview_id` / turn 信息 → 迁移到 Interview Log。
-3. **为 Interview Log 增加独立 handler**  
-   - 在 `backend/app/utils/logger.py` 或新的模块中：
-     - 创建专用的 `interview` logger 或在现有 `ai_interview` logger 上增加按面试维度切分的 handler。
-     - 推荐使用结构化 JSON 格式。
-4. **灰度上线与回滚预案**  
-   - 初期可同时将 Interview Log 事件写入 Server Log + Interview Log，确保排障链路完整。
-   - 待确认稳定后，再逐步降低 Server Log 中的面试细节，转而主要依赖 Interview Log。
-5. **文档与运维约定同步**  
-   - 将本规范同步至运维与数据团队，约定：
-     - 如何按 `interview_id` / `token` 查询单场面试日志。
-     - 如何联合 Server Log 与 Interview Log 排查跨面试的系统性问题。
+1. **Server Log 仅宏观事件**  
+   - 保留服务启动/关闭、全局异常、安全与接入告警等。
+   - 面试维度最多两条：`Interview started` 与 `Interview ended`。
+2. **Interview Log 承担全量会话追踪**  
+   - 所有 `ws.*`、`openai.*`、`turn.*`、`vad.*`、决策层事件、会话内错误统一进入 Interview Log。
+   - 禁止再将 `InterviewEvent[...]` 摘要回写到 Server Log。
+3. **排障路径约定**  
+   - 先看 Server Log 判断是否系统性故障；
+   - 再按 `interview_id` / `interview_token` 查询 Interview Log 进行单场定位。
 
 ---
 

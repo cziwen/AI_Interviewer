@@ -1,5 +1,4 @@
 import logging
-import os
 import json
 from datetime import datetime
 from pathlib import Path
@@ -83,14 +82,7 @@ def log_interview_event(
     # 序列化为 JSON 字符串
     log_line = json.dumps(log_entry, ensure_ascii=False)
     
-    # 1. 记录到全局 Server Log (作为摘要)
-    summary = f"InterviewEvent[{event_name}] - ID: {interview_id}, Token: {interview_token}"
-    if level >= logging.ERROR:
-        logger.error(f"{summary} - Error: {kwargs.get('error_message') or 'Unknown'}")
-    else:
-        logger.info(summary)
-        
-    # 2. 记录到专用的面试日志文件
+    # 仅记录到专用的面试日志文件（不再重复写入 Server Log）
     if interview_token:
         date_str = datetime.now().strftime("%Y%m%d")
         interview_file = Path("logs/interviews") / f"interview_token_{interview_token}_{date_str}.log"
