@@ -178,6 +178,51 @@ ensure_env_file() {
   fi
 }
 
+get_env_value() {
+  local key="$1"
+  awk -F= -v k="$key" '$1 == k {sub(/^[^=]*=/, "", $0); print $0; exit}' .env
+}
+
+upsert_env_value() {
+  local key="$1"
+  local value="$2"
+  if awk -F= -v k="$key" '$1 == k {found=1} END {exit !found}' .env; then
+    sed -i.bak "s|^${key}=.*|${key}=${value}|" .env && rm -f .env.bak
+  else
+    printf "\n%s=%s\n" "$key" "$value" >> .env
+  fi
+}
+
+ensure_postgres_database_url() {
+  if [[ "$WITH_POSTGRES" -ne 1 ]]; then
+    return
+  fi
+
+  local pg_db pg_user pg_password current_db_url target_db_url
+  pg_db="$(get_env_value "POSTGRES_DB")"
+  pg_user="$(get_env_value "POSTGRES_USER")"
+  pg_password="$(get_env_value "POSTGRES_PASSWORD")"
+  current_db_url="$(get_env_value "DATABASE_URL")"
+
+  pg_db="${pg_db:-ai_interview}"
+  pg_user="${pg_user:-ai_interview}"
+  pg_password="${pg_password:-change_me}"
+  target_db_url="postgresql://${pg_user}:${pg_password}@db:5432/${pg_db}"
+
+  if [[ -z "$current_db_url" || "$current_db_url" == sqlite://* ]]; then
+    upsert_env_value "DATABASE_URL" "$target_db_url"
+    log "DATABASE_URL auto-updated for PostgreSQL profile."
+    return
+  fi
+
+  if [[ "$current_db_url" == postgresql://* || "$current_db_url" == postgres://* ]]; then
+    log "Using existing PostgreSQL DATABASE_URL from .env"
+    return
+  fi
+
+  log "Warning: DATABASE_URL is non-sqlite and non-postgresql. Keeping current value."
+}
+
 docker_compose_up() {
   local compose_cmd=(docker compose --env-file .env up -d --build)
   if [[ "$WITH_POSTGRES" -eq 1 ]]; then
@@ -197,6 +242,7 @@ main() {
   start_docker_service
   install_compose_if_needed
   ensure_env_file
+  ensure_postgres_database_url
 
   log "Building and starting containers ..."
   docker_compose_up

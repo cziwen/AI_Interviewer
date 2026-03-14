@@ -22,7 +22,9 @@ cp .env.example .env
 ./deploy.sh --with-postgres
 ```
 
-并在 `.env` 中把 `DATABASE_URL` 改成 PostgreSQL 连接串。
+- 脚本会在 `--with-postgres` 下自动检查 `.env`：
+  - 若 `DATABASE_URL` 为空或仍是 sqlite，会自动改为 `postgresql://<POSTGRES_USER>:<POSTGRES_PASSWORD>@db:5432/<POSTGRES_DB>`。
+  - 若你已手动设置 PostgreSQL 连接串，脚本会保留现有值。
 
 ## 本机推送并远程部署（可选）
 
