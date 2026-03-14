@@ -12,6 +12,10 @@ export const getApiOrigin = (): string => {
 
 export const buildRealtimeWsUrl = (token: string): string => {
   const origin = getApiOrigin();
+  if (!origin) {
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    return `${wsProtocol}//${window.location.host}/api/realtime/ws/${token}`;
+  }
   const wsOrigin = origin.startsWith('https://')
     ? origin.replace(/^https:\/\//, 'wss://')
     : origin.replace(/^http:\/\//, 'ws://');

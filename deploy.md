@@ -12,9 +12,9 @@ cp .env.example .env
 
 部署完成后访问：
 
-- Frontend: `http://<ECS_IP>`
-- Backend API: `http://<ECS_IP>:8000`
-- API Docs: `http://<ECS_IP>:8000/docs`
+- Application: `http://<ECS_IP>`
+- Backend API: `http://<ECS_IP>/api`
+- API Docs: `http://<ECS_IP>/docs`
 
 ## 启用 PostgreSQL（可选）
 
@@ -48,6 +48,7 @@ docker compose down
 
 ## 最小检查清单
 
-- ECS 安全组已放行：`80`、`8000`（如启用 Postgres 再放行 `5432`）
+- ECS 安全组已放行：`80`（上 HTTPS 时放行 `443`；如启用 Postgres 再放行 `5432`）
 - `.env` 已正确设置 `OPENAI_API_KEY`
-- 域名/HTTPS 暂未包含在该脚本内（后续可加 Nginx + 证书）
+- 前后端均走同域（`/` + `/api`），后端 `8000` 不再对公网暴露
+- 域名/HTTPS 暂未包含在该脚本内（后续可加证书）

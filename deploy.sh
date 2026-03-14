@@ -202,9 +202,9 @@ main() {
   docker_compose_up
 
   log "Deployment completed."
-  log "Frontend: http://<ECS_IP>"
-  log "Backend API: http://<ECS_IP>:8000"
-  log "API Docs: http://<ECS_IP>:8000/docs"
+  log "Application: http://<ECS_IP>"
+  log "API: http://<ECS_IP>/api"
+  log "API Docs: http://<ECS_IP>/docs"
 }
 
 main "$@"
