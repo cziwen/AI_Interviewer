@@ -1,5 +1,17 @@
+from pathlib import Path
+from dotenv import load_dotenv
 from pydantic_settings import BaseSettings
 import os
+
+# Load env in a predictable order:
+# 1) project root .env (deployment / docker compose)
+# 2) backend/.env (local backend-only development overrides)
+CURRENT_FILE = Path(__file__).resolve()
+BACKEND_DIR = CURRENT_FILE.parents[1]
+PROJECT_ROOT = CURRENT_FILE.parents[2]
+
+load_dotenv(PROJECT_ROOT / ".env", override=False)
+load_dotenv(BACKEND_DIR / ".env", override=True)
 
 class Settings(BaseSettings):
     OPENAI_API_KEY: str | None = None

@@ -10,6 +10,8 @@ cp .env.example .env
 ./deploy.sh
 ```
 
+说明：部署只读取**项目根目录** `.env`，不会读取 `backend/.env`。
+
 部署完成后访问：
 
 - Application: `https://<DOMAIN>`

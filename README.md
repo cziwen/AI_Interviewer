@@ -53,13 +53,10 @@ cd backend
 # 安装依赖
 pip install -r requirements.txt
 
-# 配置环境变量
-cat > .env << EOF
-OPENAI_API_KEY=your_openai_api_key_here
-DATABASE_URL=sqlite:///./interview.db
-STT_MODEL=gpt-4o-mini-transcribe
-EVAL_LLM_MODEL=gpt-4o-mini
-EOF
+# 配置本地环境变量（建议使用本地模板）
+cp ../.env.local.example .env
+# 然后编辑 .env，至少填 OPENAI_API_KEY
+# (可选) 如需改库路径，修改 DATABASE_URL=sqlite:///./ai_interview.db
 
 # 启动服务（默认 http://localhost:8000）
 uvicorn app.main:app --reload
@@ -121,6 +118,12 @@ npm run dev
 - 在 ECS 上配置好 `DOMAIN`、`ACME_EMAIL` 后执行 `./deploy.sh` 即可。
 
 详见：[deploy.md](deploy.md)（一键部署、启用 HTTPS、PostgreSQL 可选等）。
+
+### 环境变量文件约定
+
+- **部署（Docker/Caddy）**：使用根目录 `.env`（从 `.env.example` 复制）
+- **本地后端开发**：使用 `backend/.env`（从 `.env.local.example` 复制）
+- 后端会优先读取根目录 `.env`，再读取 `backend/.env` 作为本地覆盖，减少本地/部署切换成本
 
 ## 📖 使用流程
 

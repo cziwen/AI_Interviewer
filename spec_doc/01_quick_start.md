@@ -31,13 +31,9 @@ source venv/bin/activate  # Windows: venv\Scripts\activate
 # 安装依赖
 pip install -r requirements.txt
 
-# 配置环境变量
-cat > .env << EOF
-OPENAI_API_KEY=sk-your-api-key-here
-DATABASE_URL=sqlite:///./interview.db
-ADMIN_USERNAME=admin
-ADMIN_PASSWORD=admin123
-EOF
+# 配置本地环境变量（推荐）
+cp ../.env.local.example .env
+# 至少填写 OPENAI_API_KEY
 
 # 启动服务
 uvicorn app.main:app --reload
@@ -155,6 +151,11 @@ curl -X POST http://localhost:8000/api/interviews/create \
 
 ## ⚙️ 环境变量说明
 
+### 文件约定（推荐）
+
+- 本地后端开发：`backend/.env`（由 `../.env.local.example` 复制）
+- Docker 部署：项目根目录 `.env`（由 `.env.example` 复制）
+
 ### 必需配置
 
 | 变量 | 说明 | 示例 |
@@ -165,10 +166,10 @@ curl -X POST http://localhost:8000/api/interviews/create \
 
 | 变量 | 说明 | 默认值 |
 |-----|------|--------|
-| `DATABASE_URL` | 数据库连接 | `sqlite:///./interview.db` |
+| `DATABASE_URL` | 数据库连接 | `sqlite:///./ai_interview.db` |
 | `ADMIN_USERNAME` | 管理员用户名 | `admin` |
 | `ADMIN_PASSWORD` | 管理员密码 | `admin123` |
-| `JWT_SECRET` | JWT 签名密钥 | 自动生成 |
+| `JWT_SECRET` | JWT 签名密钥 | `local-dev-secret-change-in-production` |
 | `UPLOAD_DIR` | 音频文件存储目录 | `./app/static/uploads` |
 
 ## ⚠️ 常见问题
