@@ -146,7 +146,7 @@ const AdminInterviews: React.FC = () => {
   const closeModal = () => {
     setShowModal(false);
     setCreatedLink('');
-    setNewInterview({ name: '', position: '', resume_brief: '' });
+    setNewInterview({ name: '', position_key: '', resume_brief: '' });
   };
 
   if (loading) return <div style={{ padding: '20px', color: 'var(--text)' }}>加载中...</div>;
