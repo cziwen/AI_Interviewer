@@ -18,6 +18,7 @@ python-dotenv>=1.0
 
 # Auth
 passlib[bcrypt]>=1.7
+bcrypt>=4.0.1,<4.1.0
 python-jose[cryptography]>=3.3
 
 # OpenAI & HTTP

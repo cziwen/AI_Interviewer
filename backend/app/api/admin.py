@@ -10,39 +10,49 @@ from ..models.answer import Answer
 from ..schemas.admin import AdminLogin, Token, InterviewSummary
 from ..services.auth import verify_password, create_access_token, get_password_hash, get_current_admin
 from ..config import settings
+from ..utils.logger import logger
 
 router = APIRouter()
 
 @router.post("/login", response_model=Token)
 def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
-    # Check if admin user exists, if not create from settings
-    admin = db.query(AdminUser).filter(AdminUser.username == form_data.username).first()
-    if not admin:
-        if form_data.username == settings.ADMIN_USERNAME and form_data.password == settings.ADMIN_PASSWORD:
-            # Create the admin user in DB
-            admin = AdminUser(
-                username=settings.ADMIN_USERNAME,
-                password_hash=get_password_hash(settings.ADMIN_PASSWORD)
-            )
-            db.add(admin)
-            db.commit()
-            db.refresh(admin)
-        else:
+    try:
+        # Check if admin user exists, if not create from settings
+        admin = db.query(AdminUser).filter(AdminUser.username == form_data.username).first()
+        if not admin:
+            if form_data.username == settings.ADMIN_USERNAME and form_data.password == settings.ADMIN_PASSWORD:
+                # Create the admin user in DB
+                admin = AdminUser(
+                    username=settings.ADMIN_USERNAME,
+                    password_hash=get_password_hash(settings.ADMIN_PASSWORD)
+                )
+                db.add(admin)
+                db.commit()
+                db.refresh(admin)
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Incorrect username or password",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+
+        if not verify_password(form_data.password, admin.password_hash):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Incorrect username or password",
                 headers={"WWW-Authenticate": "Bearer"},
             )
-    
-    if not verify_password(form_data.password, admin.password_hash):
+
+        access_token = create_access_token(data={"sub": admin.username})
+        return {"access_token": access_token, "token_type": "bearer"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Admin login failed: %s", e)
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect username or password",
-            headers={"WWW-Authenticate": "Bearer"},
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Login failed due to a server error. Check server logs.",
         )
-    
-    access_token = create_access_token(data={"sub": admin.username})
-    return {"access_token": access_token, "token_type": "bearer"}
 
 @router.get("/interviews", response_model=List[InterviewSummary])
 def list_interviews(db: Session = Depends(get_db), current_admin: AdminUser = Depends(get_current_admin)):

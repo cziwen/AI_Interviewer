@@ -4,6 +4,7 @@ from .api import interviews, admin, realtime, job_profiles
 from .database import Base, engine
 from .utils.logger import logger
 from .models import job_profile  # Ensure model is registered for create_all
+from .models import admin_user  # Ensure admin_users table is created
 
 # Create tables
 Base.metadata.create_all(bind=engine)
