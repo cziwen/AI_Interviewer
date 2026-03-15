@@ -1,4 +1,23 @@
 services:
+  caddy:
+    image: caddy:alpine
+    container_name: ai_interviewer_caddy
+    ports:
+      - "80:80"
+      - "443:443"
+    env_file:
+      - .env
+    environment:
+      DOMAIN: ${DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - frontend
+    restart: unless-stopped
+
   backend:
     build:
       context: ./backend
@@ -22,8 +41,6 @@ services:
       args:
         VITE_API_BASE_URL: ${VITE_API_BASE_URL:-/api}
     container_name: ai_interviewer_frontend
-    ports:
-      - "80:80"
     depends_on:
       - backend
     restart: unless-stopped
@@ -44,6 +61,8 @@ services:
     restart: unless-stopped
 
 volumes:
+  caddy_data:
+  caddy_config:
   backend_data:
   backend_uploads:
   postgres_data:

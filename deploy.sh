@@ -253,6 +253,20 @@ docker_compose_up() {
   fi
 }
 
+validate_https_env() {
+  local domain acme_email
+  domain="$(get_env_value "DOMAIN")"
+  acme_email="$(get_env_value "ACME_EMAIL")"
+
+  if [[ -z "$domain" || "$domain" == "your.domain.com" ]]; then
+    die "DOMAIN is not configured in .env. Set it to your real domain before deployment."
+  fi
+
+  if [[ -z "$acme_email" || "$acme_email" == "your-email@example.com" ]]; then
+    die "ACME_EMAIL is not configured in .env. Set a real email for Let's Encrypt notifications."
+  fi
+}
+
 main() {
   log "Starting ${PROJECT_NAME} deployment ..."
   install_docker_if_needed
@@ -260,14 +274,16 @@ main() {
   install_compose_if_needed
   ensure_env_file
   ensure_postgres_database_url
+  validate_https_env
 
   log "Building and starting containers ..."
   docker_compose_up
 
   log "Deployment completed."
-  log "Application: http://<ECS_IP>"
-  log "API: http://<ECS_IP>/api"
-  log "API Docs: http://<ECS_IP>/docs"
+  log "Application: https://$(get_env_value "DOMAIN")"
+  log "API: https://$(get_env_value "DOMAIN")/api"
+  log "API Docs: https://$(get_env_value "DOMAIN")/docs"
+  log "TLS certificates are managed by Caddy and renew automatically."
 }
 
 main "$@"

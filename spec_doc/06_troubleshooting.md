@@ -2,12 +2,45 @@
 
 ## 📋 目录
 
+- [HTTP 与安全上下文问题](#http-与安全上下文问题)
 - [音频问题](#音频问题)
 - [WebSocket 连接问题](#websocket-连接问题)
 - [OpenAI API 问题](#openai-api-问题)
 - [VAD 问题](#vad-问题)
 - [数据库问题](#数据库问题)
 - [性能问题](#性能问题)
+
+---
+
+## 🔒 HTTP 与安全上下文问题
+
+### 问题：复制按钮无效（Cannot read properties of undefined (reading 'writeText')）
+
+#### 症状
+- 管理后台创建面试后点击「复制链接」无反应或报错
+- 浏览器控制台：`Uncaught TypeError: Cannot read properties of undefined (reading 'writeText')`
+
+#### 原因
+`navigator.clipboard`（Clipboard API）仅在 **安全上下文**（HTTPS 或 localhost）下可用。页面通过 HTTP 访问时，`navigator.clipboard` 为 `undefined`，导致复制失败。
+
+#### 解决方案
+- **生产环境**：必须使用 HTTPS。按 [deploy.md](../deploy.md) 配置 `DOMAIN`、`ACME_EMAIL` 后执行 `./deploy.sh`，由 Caddy 自动申请 Let's Encrypt 证书，访问 `https://<DOMAIN>`。
+- **本地开发**：使用 `http://localhost` 访问时，Clipboard API 可用；若用 IP 或非 localhost 的 HTTP，复制可能同样不可用，可改为用 HTTPS 或 localhost。
+
+---
+
+### 问题：无法拿到本机设备（Error enumerating devices: getUserMedia undefined）
+
+#### 症状
+- 面试页「选择麦克风/扬声器」下拉为空，或控制台报错
+- 控制台：`Error enumerating devices: TypeError: Cannot read properties of undefined (reading 'getUserMedia')`
+
+#### 原因
+`navigator.mediaDevices`（含 `getUserMedia`、`enumerateDevices`）仅在 **安全上下文**（HTTPS 或 localhost）下可用。通过 HTTP（且非 localhost）访问时，`navigator.mediaDevices` 为 `undefined`，无法枚举或使用音视频设备。
+
+#### 解决方案
+- **生产环境**：必须使用 HTTPS，同上。启用 Caddy + Let's Encrypt 后，使用 `https://<DOMAIN>` 访问即可正常选择与测试设备。
+- **本地开发**：使用 `http://localhost` 可正常使用设备；若用 IP 或其它 HTTP 地址，请改用 localhost 或 HTTPS。
 
 ---
 
@@ -675,6 +708,7 @@ ps aux | grep uvicorn
    - [实时面试功能](03_features/03.2_realtime_interview.md)
    - [音频处理](04_technical_details/04.2_audio_processing.md)
    - [半双工策略](04_technical_details/04.4_half_duplex_strategy.md)
+   - 复制/设备在 HTTP 下不可用 → [HTTP 与安全上下文问题](#http-与安全上下文问题)；生产上 HTTPS → [deploy.md](../deploy.md)
 
 3. **提交 Issue**：
    - 提供错误日志

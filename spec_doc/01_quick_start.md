@@ -271,7 +271,13 @@ DATABASE_URL=postgresql://user:pass@localhost/ai_interview
 
 ## 💡 生产环境部署
 
-### 使用 Gunicorn + Uvicorn Workers
+生产环境**必须使用 HTTPS**，否则浏览器会限制以下能力：
+- **复制链接**：`navigator.clipboard` 仅在安全上下文中可用
+- **麦克风/扬声器选择**：`navigator.mediaDevices` 仅在安全上下文中可用
+
+**推荐方式**：使用项目自带一键部署（Caddy + Let's Encrypt 自动续期），详见根目录 [deploy.md](../deploy.md)。在 ECS 上配置 `DOMAIN`、`ACME_EMAIL` 后执行 `./deploy.sh` 即可获得 HTTPS。
+
+### 使用 Gunicorn + Uvicorn Workers（仅后端）
 
 ```bash
 pip install gunicorn
@@ -282,12 +288,16 @@ gunicorn app.main:app \
   --bind 0.0.0.0:8000
 ```
 
-### 使用 Nginx 反向代理
+### 使用 Nginx 反向代理（需自行配置 TLS）
+
+若不用项目内的 Caddy 方案，可自建 Nginx，并**务必配置 HTTPS**（如 Let's Encrypt + certbot）：
 
 ```nginx
 server {
-    listen 80;
+    listen 443 ssl;
     server_name your-domain.com;
+    # ssl_certificate /path/to/fullchain.pem;
+    # ssl_certificate_key /path/to/privkey.pem;
 
     location / {
         proxy_pass http://localhost:5173;

@@ -28,10 +28,14 @@
 - [05_logging.md](05_logging.md) - 日志系统
 - [06_troubleshooting.md](06_troubleshooting.md) - 故障排查指南
 
+### 部署
+- 项目根目录 [deploy.md](../deploy.md) - ECS 一键部署、HTTPS（Let's Encrypt 自动续期）、PostgreSQL 可选
+
 ## 🔍 快速查找
 
 **我想了解...**
 - 如何快速部署？→ [快速开始](01_quick_start.md)
+- 生产环境如何上 HTTPS？→ 根目录 [deploy.md](../deploy.md)
 - 系统如何工作？→ [系统架构](02_architecture.md)
 - 如何创建面试？→ [面试创建](03_features/03.1_interview_creation.md)
 - 实时面试如何实现？→ [实时语音面试](03_features/03.2_realtime_interview.md)

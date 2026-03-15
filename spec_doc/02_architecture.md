@@ -290,7 +290,8 @@ WebSocket 接收 Base64
 
 ### WebSocket API
 
-**连接**：`ws://localhost:8000/api/realtime/ws/{token}`
+**连接**（开发）：`ws://localhost:8000/api/realtime/ws/{token}`  
+**连接**（生产，同域 HTTPS）：`wss://<DOMAIN>/api/realtime/ws/{token}`（由 Caddy 反代，协议自动升级）
 
 **客户端 → 服务端**：
 
@@ -399,15 +400,50 @@ Internet → CDN → Nginx (反向代理)
                   OpenAI Realtime API
 ```
 
+### 生产环境（Docker + Caddy + HTTPS，推荐）
+
+项目提供一键部署脚本，使用 **Caddy** 作为反向代理，自动申请并续期 **Let's Encrypt** 证书，对外提供 HTTPS。复制链接、麦克风/扬声器枚举等依赖浏览器安全上下文，生产环境必须使用 HTTPS。
+
+```
+Internet (80/443)
+    ↓
+Caddy (反向代理 + TLS + ACME 自动续期)
+    ↓
+Frontend (Nginx，仅内网 :80)
+    ↓
+Backend (:8000)
+    ↓
+PostgreSQL / SQLite
+```
+
+- 配置 `.env` 中的 `DOMAIN`、`ACME_EMAIL` 后执行 `./deploy.sh`。
+- WebSocket 在生产环境通过同一域名访问，自动使用 `wss://`。
+
+详见项目根目录 [deploy.md](../deploy.md)。
+
 ### Docker 部署（可选）
 
 ```yaml
+# 生产推荐：使用项目根目录 docker-compose.yml + Caddy + DOMAIN/ACME_EMAIL
+# 以下为简化示例，实际以仓库内 docker-compose.yml 为准
 version: '3.8'
 services:
+  caddy:
+    image: caddy:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    environment:
+      DOMAIN: ${DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL}
+    depends_on:
+      - frontend
+
   backend:
     build: ./backend
-    ports:
-      - "8000:8000"
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
       - DATABASE_URL=postgresql://user:pass@db/ai_interview
@@ -416,8 +452,7 @@ services:
 
   frontend:
     build: ./frontend
-    ports:
-      - "5173:80"
+    # 不暴露端口，由 Caddy 反代
 
   db:
     image: postgres:15
@@ -425,6 +460,8 @@ services:
       - POSTGRES_DB=ai_interview
       - POSTGRES_USER=user
       - POSTGRES_PASSWORD=pass
+volumes:
+  caddy_data:
 ```
 
 ## 🔍 监控与日志

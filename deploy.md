@@ -6,15 +6,43 @@
 git clone <your_repo_url>
 cd AI_Interviewer
 cp .env.example .env
-# 编辑 .env，至少填 OPENAI_API_KEY / JWT_SECRET / ADMIN_PASSWORD
+# 编辑 .env，至少填 OPENAI_API_KEY / JWT_SECRET / ADMIN_PASSWORD / DOMAIN / ACME_EMAIL
 ./deploy.sh
 ```
 
 部署完成后访问：
 
-- Application: `http://<ECS_IP>`
-- Backend API: `http://<ECS_IP>/api`
-- API Docs: `http://<ECS_IP>/docs`
+- Application: `https://<DOMAIN>`
+- Backend API: `https://<DOMAIN>/api`
+- API Docs: `https://<DOMAIN>/docs`
+
+## 启用 HTTPS（Let's Encrypt，自动续期）
+
+本项目使用 Caddy 作为反向代理，自动申请并续期 Let's Encrypt 证书。
+
+前置条件：
+
+- 域名 A 记录已指向 ECS 公网 IP（如 `smartinterview.cn` -> ECS IP）
+- ECS 安全组放行 `80` 和 `443`
+
+`.env` 中至少配置：
+
+```env
+DOMAIN=smartinterview.cn
+ACME_EMAIL=admin@smartinterview.cn
+```
+
+部署：
+
+```bash
+./deploy.sh
+```
+
+说明：
+
+- 首次启动时，Caddy 会自动向 Let's Encrypt 申请证书。
+- 证书与 ACME 状态保存在 Docker 卷中，容器重启后仍可继续使用与续期。
+- 自动续期由 Caddy 内置机制完成，无需额外 cron/systemd timer。
 
 ## 启用 PostgreSQL（可选）
 
@@ -50,7 +78,8 @@ docker compose down
 
 ## 最小检查清单
 
-- ECS 安全组已放行：`80`（上 HTTPS 时放行 `443`；如启用 Postgres 再放行 `5432`）
+- ECS 安全组已放行：`80`、`443`（如启用 Postgres 再放行 `5432`）
 - `.env` 已正确设置 `OPENAI_API_KEY`
+- `.env` 已正确设置 `DOMAIN` 与 `ACME_EMAIL`
 - 前后端均走同域（`/` + `/api`），后端 `8000` 不再对公网暴露
-- 域名/HTTPS 暂未包含在该脚本内（后续可加证书）
+- 访问使用 `https://<DOMAIN>`，证书自动续期由 Caddy 管理

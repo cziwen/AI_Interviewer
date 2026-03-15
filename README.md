@@ -113,6 +113,15 @@ npm run dev
 - **HR 管理后台**：`http://localhost:5173/admin/login`
 - **API 文档**：`http://localhost:8000/docs`
 
+### 6. 生产环境部署（Docker + HTTPS）
+
+生产环境推荐使用项目自带的一键部署脚本，通过 **Caddy** 反向代理自动申请并续期 **Let's Encrypt** 证书，提供 HTTPS：
+
+- **复制链接、麦克风/扬声器选择** 等能力依赖浏览器安全上下文（HTTPS），生产必须使用 HTTPS。
+- 在 ECS 上配置好 `DOMAIN`、`ACME_EMAIL` 后执行 `./deploy.sh` 即可。
+
+详见：[deploy.md](deploy.md)（一键部署、启用 HTTPS、PostgreSQL 可选等）。
+
 ## 📖 使用流程
 
 ### HR 创建面试
@@ -179,13 +188,13 @@ question,reference
 
 ## 📚 完整文档
 
-详细技术文档请查看 [spec_doc/README.md](spec_doc/README.md)：
-
-- [快速开始指南](spec_doc/01_quick_start.md)
-- [系统架构设计](spec_doc/02_architecture.md)
-- [功能模块详解](spec_doc/03_features/)
-- [技术实现细节](spec_doc/04_technical_details/)
-- [故障排查指南](spec_doc/06_troubleshooting.md)
+- **部署**：[deploy.md](deploy.md) — ECS 一键部署、HTTPS（Let's Encrypt 自动续期）、PostgreSQL 可选  
+- **技术文档**：[spec_doc/README.md](spec_doc/README.md)：
+  - [快速开始指南](spec_doc/01_quick_start.md)
+  - [系统架构设计](spec_doc/02_architecture.md)
+  - [功能模块详解](spec_doc/03_features/)
+  - [技术实现细节](spec_doc/04_technical_details/)
+  - [故障排查指南](spec_doc/06_troubleshooting.md)
 
 ## 🛠️ 技术栈
 
