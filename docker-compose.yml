@@ -12,6 +12,7 @@ services:
     volumes:
       - backend_data:/app/data
       - backend_uploads:/app/app/static/uploads
+      - backend_logs:/app/logs
     restart: unless-stopped
 
   frontend:
@@ -45,4 +46,5 @@ services:
 volumes:
   backend_data:
   backend_uploads:
+  backend_logs:
   postgres_data:
