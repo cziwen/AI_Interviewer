@@ -5,17 +5,20 @@ from ..config import settings
 
 async def evaluate_interview(answers: List[Dict[str, Any]]) -> tuple[Dict[str, Any], Dict[str, int]]:
     """
-    使用 OpenAI Chat Completion API 对整场面试进行统一评分。
+    使用火山方舟 Chat API 对整场面试进行统一评分。
     返回 (result_dict, usage_dict)
     """
-    if not settings.OPENAI_API_KEY:
+    if not settings.ARK_API_KEY:
         return {
             "total_score": 0,
             "dimension_scores": {},
-            "comment": "OpenAI API Key not configured."
+            "comment": "ARK API Key not configured."
         }, {"input_tokens": 0, "output_tokens": 0}
 
-    client = openai.AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+    client = openai.AsyncOpenAI(
+        api_key=settings.ARK_API_KEY,
+        base_url=settings.ARK_BASE_URL,
+    )
     
     # Prepare prompt
     prompt = "你是一名资深面试官。请根据以下面试问答记录，对候选人的表现进行综合评分。\n\n"
@@ -39,7 +42,7 @@ async def evaluate_interview(answers: List[Dict[str, Any]]) -> tuple[Dict[str, A
 
     try:
         response = await client.chat.completions.create(
-            model=settings.EVAL_LLM_MODEL,
+            model=settings.ARK_LLM_MODEL,
             messages=[
                 {"role": "system", "content": "你是一名专业的面试评估专家。"},
                 {"role": "user", "content": prompt}

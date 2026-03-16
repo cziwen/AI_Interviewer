@@ -238,7 +238,7 @@ class RealtimeTurnOrchestrator:
             outcome="success",
             details=log_data,
             duration_ms=int((turn.completed_ts - turn.created_ts) * 1000) if turn.completed_ts else None,
-            openai_response_id=response_id
+            upstream_response_id=response_id
         )
         return turn
 
@@ -273,7 +273,7 @@ class RealtimeTurnOrchestrator:
             turn_id=str(turn_id),
             outcome="cancelled",
             details=turn.to_log_dict(),
-            openai_response_id=response_id
+            upstream_response_id=response_id
         )
         return turn
 
@@ -324,7 +324,7 @@ class RealtimeTurnOrchestrator:
             error_code=error_code,
             error_message=error_message,
             details=turn.to_log_dict(),
-            openai_response_id=response_id
+            upstream_response_id=response_id
         )
         return turn
 

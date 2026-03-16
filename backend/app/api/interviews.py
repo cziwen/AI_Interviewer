@@ -39,7 +39,7 @@ async def process_interview_evaluation(interview_id: int):
                 transcript, duration = await transcribe_audio(answer.audio_url)
                 answer.transcript = transcript
                 # Record STT usage
-                usage_tracker.add_audio_usage(model_name=settings.STT_MODEL, input_seconds=duration)
+                usage_tracker.add_audio_usage(model_name=settings.ARK_STT_MODEL, input_seconds=duration)
                 
                 # Dialogue Log is now handled in real-time in realtime.py
                 # No need to log here to avoid duplicates and ensure chronological order
@@ -62,7 +62,7 @@ async def process_interview_evaluation(interview_id: int):
         
         # Record Eval usage
         usage_tracker.add_text_usage(
-            model_name=settings.EVAL_LLM_MODEL,
+            model_name=settings.ARK_LLM_MODEL,
             input_tokens=eval_usage["input_tokens"],
             output_tokens=eval_usage["output_tokens"]
         )

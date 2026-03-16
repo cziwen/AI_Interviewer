@@ -6,7 +6,7 @@ from backend.app.services.realtime.session_runner import RealtimeSessionRunner
 from backend.app.services.realtime.state import SessionState
 
 
-class DummyOpenAIWebSocket:
+class DummyUpstreamWebSocket:
     def __init__(self):
         self.sent = []
 
@@ -46,7 +46,7 @@ class PipelineRaceGuardTests(unittest.IsolatedAsyncioTestCase):
         runner = RealtimeSessionRunner(DummyWebSocket(), "token", interview, None)
         runner._load_job_profile()
         runner._init_runtime_state()
-        runner.openai_ws = DummyOpenAIWebSocket()
+        runner.upstream_ws = DummyUpstreamWebSocket()
 
         runner.state.has_uncommitted_audio = True
         first = await runner._commit_input_audio_once("test", "item_1")
@@ -54,7 +54,7 @@ class PipelineRaceGuardTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(first)
         self.assertFalse(second)
-        self.assertEqual(len(runner.openai_ws.sent), 1)
+        self.assertEqual(len(runner.upstream_ws.sent), 1)
 
 
 if __name__ == "__main__":

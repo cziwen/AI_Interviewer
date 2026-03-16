@@ -1,65 +1,46 @@
 # AI 面试系统技术文档
 
-欢迎使用 AI 面试系统技术文档。本系统基于 OpenAI Realtime API，提供实时语音面试体验。
+欢迎使用 AI 面试系统技术文档。
+当前系统采用**三段式语音链路**：
+
+- ASR：豆包语音 ASR（支持 `sauc_v3` / `openspeech_v2` / `gateway_json`）
+- LLM：方舟文本模型（默认 `doubao-seed-2-0-mini-260215`）
+- TTS：豆包语音合成（当前实现为 v1 HTTP，后端分片下发音频）
 
 ## 📚 文档导航
 
 ### 快速入门
-- [01_quick_start.md](01_quick_start.md) - 快速开始指南
+- [01_quick_start.md](01_quick_start.md) - 快速开始与环境变量
 
 ### 系统架构
-- [02_architecture.md](02_architecture.md) - 整体架构设计
+- [02_architecture.md](02_architecture.md) - 当前后端三段式架构
 
 ### 功能模块
 - [03.1_interview_creation.md](03_features/03.1_interview_creation.md) - 面试创建流程
-- [03.2_realtime_interview.md](03_features/03.2_realtime_interview.md) - 实时语音面试
+- [03.2_realtime_interview.md](03_features/03.2_realtime_interview.md) - 实时语音面试主链路
 - [03.3_ai_evaluation.md](03_features/03.3_ai_evaluation.md) - AI 评估系统
 - [03.4_admin_dashboard.md](03_features/03.4_admin_dashboard.md) - HR 管理后台
 - [03.5_job_profile_config.md](03_features/03.5_job_profile_config.md) - 岗位配置管理
 
 ### 技术细节
-- [04.1_realtime_api.md](04_technical_details/04.1_realtime_api.md) - OpenAI Realtime API 集成
-- [04.2_audio_processing.md](04_technical_details/04.2_audio_processing.md) - 音频处理技术
-- [04.3_vad_mechanism.md](04_technical_details/04.3_vad_mechanism.md) - VAD 语音检测机制
-- [04.4_half_duplex_strategy.md](04_technical_details/04.4_half_duplex_strategy.md) - 半双工音频策略
-- [04.5_realtime_turn_orchestrator_refactor.md](04_technical_details/04.5_realtime_turn_orchestrator_refactor.md) - Realtime Turn 编排重构规范
+- [04.1_realtime_api.md](04_technical_details/04.1_realtime_api.md) - Realtime 三段式实现细节
+- [04.2_audio_processing.md](04_technical_details/04.2_audio_processing.md) - 音频处理
+- [04.3_vad_mechanism.md](04_technical_details/04.3_vad_mechanism.md) - VAD 与分段策略
+- [04.4_half_duplex_strategy.md](04_technical_details/04.4_half_duplex_strategy.md) - 半双工门控
+- [04.5_realtime_turn_orchestrator.md](04_technical_details/04.5_realtime_turn_orchestrator.md) - 回合编排
+- [04.6_realtime_anti_drift_mechanism.md](04_technical_details/04.6_realtime_anti_drift_mechanism.md) - 防跑题机制
 
 ### 运维与调试
-- [05_logging.md](05_logging.md) - 日志系统
-- [06_troubleshooting.md](06_troubleshooting.md) - 故障排查指南
-
-### 部署
-- 项目根目录 [deploy.md](../deploy.md) - ECS 一键部署、HTTPS（Let's Encrypt 自动续期）、PostgreSQL 可选
-
-## 🔍 快速查找
-
-**我想了解...**
-- 如何快速部署？→ [快速开始](01_quick_start.md)
-- 生产环境如何上 HTTPS？→ 根目录 [deploy.md](../deploy.md)
-- 系统如何工作？→ [系统架构](02_architecture.md)
-- 如何创建面试？→ [面试创建](03_features/03.1_interview_creation.md)
-- 实时面试如何实现？→ [实时语音面试](03_features/03.2_realtime_interview.md)
-- 如何配置岗位题库？→ [岗位配置](03_features/03.5_job_profile_config.md)
-- 音频为什么听不到？→ [故障排查](06_troubleshooting.md)
-- 为什么有回声？→ [半双工策略](04_technical_details/04.4_half_duplex_strategy.md)
+- [05_logging.md](05_logging.md) - 日志事件与排查入口
+- [06_troubleshooting.md](06_troubleshooting.md) - 常见故障排查
 
 ## 🎯 核心特性
 
-1. **实时语音交互**：基于 OpenAI Realtime API 的低延迟语音对话
-2. **智能面试流程**：自动化提问、追问、节奏控制
-3. **岗位题库管理**：支持 CSV 题库导入和 JSON JD 配置
-4. **多维度评估**：面试结束后自动生成结构化评分报告
-5. **设备适配**：支持麦克风和扬声器选择及实时测试
+1. 浏览器到后端保持轻量协议（`audio/end_turn/no_response_timeout`）
+2. 后端状态机控制面试流程，不依赖端到端模型自由发挥
+3. LLM 负责文本生成，TTS 负责语音输出，便于可控与审计
+4. 音频统一为 PCM16 @ 24kHz，兼容前端播放链路
 
-## 🛠️ 技术栈
+## 📝 备注
 
-- **前端**：React + TypeScript + Web Audio API
-- **后端**：FastAPI + SQLAlchemy + WebSocket
-- **AI 服务**：OpenAI Realtime API (gpt-realtime-mini)
-- **数据库**：PostgreSQL / SQLite
-- **音频格式**：PCM16 @ 24kHz
-
-## 📝 版本信息
-
-- 当前版本：2.0 (Realtime 升级版)
-- 最后更新：2026-03-11
+- 部署与 HTTPS 参考项目根目录 [deploy.md](../deploy.md)。

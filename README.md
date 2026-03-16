@@ -1,10 +1,10 @@
 # AI 面试系统
 
-基于 OpenAI Realtime API 的智能语音面试系统，提供实时对话、智能追问、多维度评估等企业级招聘解决方案。
+基于火山方舟 Realtime API 的智能语音面试系统，提供实时对话、智能追问、多维度评估等企业级招聘解决方案。
 
 ## ✨ 核心特性
 
-- 🎙️ **实时语音交互**：基于 OpenAI Realtime API，低延迟（<2s）的自然对话体验
+- 🎙️ **实时语音交互**：基于火山方舟 Realtime API，低延迟（<2s）的自然对话体验
 - 🤖 **智能面试流程**：自动化提问、追问、节奏控制，模拟真人面试官
 - 📊 **岗位题库管理**：支持 CSV 题库导入和 JSON JD 配置，灵活匹配不同岗位
 - 📈 **多维度评估**：面试结束后自动生成结构化评分报告
@@ -37,7 +37,7 @@ AI_Interviewer/
 **前置要求**：
 - Node.js 16+
 - Python 3.9+
-- OpenAI API Key（支持 Realtime API）
+- 火山方舟 API Key（支持 Realtime API）
 
 **克隆项目**：
 ```bash
@@ -55,7 +55,7 @@ pip install -r requirements.txt
 
 # 配置本地环境变量（建议使用本地模板）
 cp ../.env.local.example .env
-# 然后编辑 .env，至少填 OPENAI_API_KEY
+# 然后编辑 .env，至少填 ARK_API_KEY
 # (可选) 如需改库路径，修改 DATABASE_URL=sqlite:///./ai_interview.db
 
 # 启动服务（默认 http://localhost:8000）
@@ -205,14 +205,14 @@ question,reference
 |-----|------|
 | **前端** | React 18, TypeScript, Web Audio API |
 | **后端** | FastAPI, SQLAlchemy, WebSocket |
-| **AI 服务** | OpenAI Realtime API (gpt-realtime-mini) |
+| **AI 服务** | 火山方舟 Realtime API |
 | **音频处理** | PCM16 @ 24kHz, Server VAD, ScriptProcessorNode |
 | **数据库** | PostgreSQL / SQLite |
 
 ## 🔧 核心技术亮点
 
-1. **OpenAI Realtime API 集成**：全流程 WebSocket 通信，支持音频流式传输
-2. **Server VAD 机制**：利用 OpenAI 服务端语音检测，精确定位说话起止
+1. **火山方舟 Realtime API 集成**：全流程 WebSocket 通信，支持音频流式传输
+2. **Server VAD 机制**：利用方舟服务端语音检测，精确定位说话起止
 3. **半双工音频策略**：基于时间轴的智能门控，防止 AI 声音被麦克风采集
 4. **动态节奏控制**：根据预设时长自动调整提问节奏，支持超时自然收尾
 5. **设备适配优化**：支持音频设备选择和实时音量可视化

@@ -66,7 +66,7 @@ spec_doc/
 
 ### 技术细节文档（全部完成）
 
-10. ✅ **04.1_realtime_api.md** - OpenAI Realtime API 集成
+10. ✅ **04.1_realtime_api.md** - ASR 上游语音网关 集成
 11. ✅ **04.2_audio_processing.md** - 音频处理技术（PCM16 @ 24kHz）
 12. ✅ **04.3_vad_mechanism.md** - VAD 语音活动检测机制
 13. ✅ **04.4_half_duplex_strategy.md** - 半双工音频策略（回声消除）

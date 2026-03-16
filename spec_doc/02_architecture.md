@@ -1,509 +1,72 @@
 # 系统架构设计
 
-## 📐 整体架构
+## 整体架构
 
-AI 面试系统采用前后端分离架构，基于 OpenAI Realtime API 实现实时语音交互。
+当前系统采用前后端分离 + 后端控轮策略。
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                         候选人浏览器                               │
-│  ┌──────────────────────────────────────────────────────────┐   │
-│  │  React Frontend (Interview.tsx)                          │   │
-│  │  ├─ Web Audio API (24kHz PCM16)                         │   │
-│  │  ├─ WebSocket Client                                     │   │
-│  │  ├─ 半双工音频门控                                         │   │
-│  │  └─ 实时转写显示                                           │   │
-│  └──────────────────────────────────────────────────────────┘   │
-└─────────────────┬───────────────────────────────────────────────┘
-                  │ WebSocket (音频流 + 控制消息)
-                  ↓
-┌─────────────────────────────────────────────────────────────────┐
-│                    FastAPI 后端服务                                │
-│  ┌──────────────────────────────────────────────────────────┐   │
-│  │  API 层 (api/)                                           │   │
-│  │  ├─ realtime.py (WebSocket 入口)                         │   │
-│  │  ├─ interviews.py (面试管理 REST API)                    │   │
-│  │  ├─ job_profiles.py (岗位配置 API)                       │   │
-│  │  └─ admin.py (HR 后台 API)                               │   │
-│  └──────────────────────────────────────────────────────────┘   │
-│  ┌──────────────────────────────────────────────────────────┐   │
-│  │  业务逻辑层 (services/)                                    │   │
-│  │  ├─ realtime/ (实时面试核心模块)                          │   │
-│  │  │  ├─ session_runner.py (会话主控)                      │   │
-│  │  │  ├─ audio_pipeline.py (音频管理)                      │   │
-│  │  │  ├─ transcript_store.py (转写存储)                    │   │
-│  │  │  ├─ decision_engine.py (决策引擎)                     │   │
-│  │  │  ├─ turn_planner.py (回合规划)                        │   │
-│  │  │  ├─ persistence.py (数据持久化)                       │   │
-│  │  │  └─ state.py (状态管理)                               │   │
-│  │  ├─ realtime_turn_orchestrator.py (回合编排)             │   │
-│  │  ├─ evaluator.py (评估服务)                              │   │
-│  │  ├─ question_generator.py (题目生成)                     │   │
-│  │  ├─ auth.py (认证服务)                                   │   │
-│  │  └─ stt.py (语音转写)                                    │   │
-│  └──────────────────────────────────────────────────────────┘   │
-│  ┌──────────────────────────────────────────────────────────┐   │
-│  │  数据层                                                     │   │
-│  │  ├─ models/ (Interview, Answer, JobProfile, AdminUser)  │   │
-│  │  ├─ database.py (数据库连接)                             │   │
-│  │  └─ PostgreSQL / SQLite                                  │   │
-│  └──────────────────────────────────────────────────────────┘   │
-└─────────────────┬───────────────────────────────────────────────┘
-                  │ HTTPS (Realtime API)
-                  ↓
-┌─────────────────────────────────────────────────────────────────┐
-│                   OpenAI Realtime API                             │
-│  ├─ Server VAD (语音活动检测)                                    │
-│  ├─ gpt-realtime-mini (对话模型)                              │
-│  ├─ Whisper (实时转写)                                           │
-│  └─ TTS (语音合成)                                               │
-└─────────────────────────────────────────────────────────────────┘
+```text
+Browser (Web Audio + WS)
+  -> FastAPI RealtimeSessionRunner
+      -> ASR Upstream (sauc_v3 / openspeech_v2 / gateway_json)
+      -> DecisionEngine (JSON action)
+      -> ResponseGenerator (LLM)
+      -> TtsSynthesizer (TTS)
+      -> AudioChunker (PCM16 base64 chunks)
+  -> Browser playback (response.audio.delta)
 ```
 
-## 🔄 核心流程
+## 关键设计原则
 
-### 1. 面试创建流程
+1. **流程控制在后端**
+- 候选人音频进入后端后，是否追问/换题/结束由状态机+决策层决定。
+- 不依赖端到端语音模型自由推进业务流程。
+
+2. **三段式语音链路**
+- ASR：只负责转写。
+- LLM：只负责生成文本。
+- TTS：只负责语音合成。
+
+3. **前端协议稳定**
+- 客户端上行：`audio` / `end_turn` / `no_response_timeout`
+- 服务端下行：`response.created` / `response.audio_transcript.delta` / `response.audio.delta` / `response.done` / `error`
+
+## Realtime 主流程
 
 ```mermaid
 sequenceDiagram
-    participant HR as HR 管理员
-    participant BE as Backend API
-    participant DB as 数据库
-    participant JP as JobProfile
+    participant C as Browser
+    participant R as SessionRunner
+    participant A as ASR Upstream
+    participant L as LLM
+    participant T as TTS
 
-    HR->>BE: POST /api/interviews/create
-    Note over HR,BE: { name, position_key, resume_brief }
-
-    BE->>JP: 查询岗位配置
-    JP-->>BE: { jd_data, question_bank }
-
-    BE->>BE: 随机抽取题目（main_question_count）
-    BE->>DB: 创建 Interview 记录
-    DB-->>BE: { id, link_token, question_set }
-
-    BE-->>HR: { link_token, ... }
-    HR->>HR: 生成面试链接并分享给候选人
+    C->>R: audio (pcm16 base64)
+    R->>A: append audio
+    A-->>R: transcript_completed
+    R->>R: decision + turn_plan
+    R->>L: generate text
+    L-->>R: text + usage
+    R->>T: synthesize(text)
+    T-->>R: pcm16 bytes
+    R-->>C: response.created
+    R-->>C: response.audio_transcript.delta
+    R-->>C: response.audio.delta (chunked)
+    R-->>C: response.done
 ```
 
-### 2. 实时面试流程
+## 数据与状态
 
-```mermaid
-sequenceDiagram
-    participant C as 候选人浏览器
-    participant WS as WebSocket Gateway
-    participant RT as OpenAI Realtime API
-    participant DB as 数据库
+- `SessionState` 维护阶段、题目序号、追问次数、提交状态、最近对话摘要。
+- `RealtimeTurnOrchestrator` 负责 turn 生命周期和业务状态迁移。
+- 音频持久化通过 `persist_audio_and_answer_sync` 落库 `Answer`。
 
-    C->>WS: 建立 WebSocket 连接
-    WS->>RT: 建立 Realtime 会话
-    WS->>RT: 发送 session.update (题目 + JD + 指令)
-    WS->>RT: 发送 response.create (开始自我介绍)
+## 配置分层
 
-    loop 实时对话
-        RT-->>WS: response.audio.delta
-        WS-->>C: 转发音频流
-        C->>C: 播放 AI 语音
+- 文本模型：`ARK_API_KEY + ARK_BASE_URL + ARK_LLM_MODEL`
+- ASR：`ARK_ASR_MODE + ARK_ASR_WS_URL + ARK_ASR_APP_ID + ARK_ASR_ACCESS_TOKEN + ARK_ASR_RESOURCE_ID + ARK_ASR_CLUSTER`
+- TTS：`ARK_TTS_MODEL + ARK_TTS_VOICE + ARK_TTS_SAMPLE_RATE`
 
-        C->>WS: 音频流 (PCM16)
-        WS->>RT: 转发音频
+## 与旧实现差异
 
-        RT-->>WS: input_audio_buffer.speech_started
-        WS->>WS: 开始缓存音频
-
-        RT-->>WS: input_audio_buffer.speech_stopped
-        WS->>DB: 保存音频片段为 WAV
-        WS->>WS: 节奏控制判断
-
-        opt 超时或节奏落后
-            WS->>RT: response.create (节奏指令)
-        end
-    end
-
-    C->>WS: 点击"结束面试"
-    WS->>WS: 关闭 Realtime 连接
-    C->>BE: POST /interviews/{token}/complete
-    BE->>BE: STT 转写 + AI 评估
-    BE-->>C: 跳转完成页
-```
-
-### 3. 评估生成流程
-
-```mermaid
-sequenceDiagram
-    participant C as 候选人
-    participant BE as Backend
-    participant STT as STT Service
-    participant LLM as OpenAI GPT-4
-    participant DB as 数据库
-
-    C->>BE: POST /interviews/{token}/complete
-
-    BE->>DB: 查询所有 Answer 记录
-
-    loop 遍历每个 Answer
-        BE->>STT: 转写音频文件
-        STT-->>BE: transcript
-        BE->>DB: 更新 Answer.transcript
-    end
-
-    BE->>BE: 组装问题和回答
-    BE->>LLM: 发送评估提示词
-    Note over BE,LLM: 包含所有 Q&A + 岗位信息
-
-    LLM-->>BE: 结构化评分报告
-    Note over LLM,BE: { overall_score, dimensions, feedback }
-
-    BE->>DB: 更新 Interview.evaluation_result
-    BE->>DB: 更新 Interview.status = EVALUATED
-
-    BE-->>C: { message, evaluation }
-    C->>C: 跳转到完成页显示结果
-```
-
-## 🗄️ 数据模型
-
-### Interview（面试记录）
-
-```python
-class Interview(Base):
-    id: int                        # 主键
-    name: str                      # 候选人姓名（nullable）
-    position: str                  # 岗位名称（nullable）
-    external_id: str               # 外部系统 ID（nullable）
-    resume_brief: str              # 简历摘要（nullable）
-    link_token: str                # 面试链接唯一标识（unique, indexed）
-    question_set: JSON             # 题目列表（动态抽取）
-    status: InterviewStatus        # CREATED/IN_PROGRESS/FINISHED/EVALUATED
-    evaluation_result: JSON        # AI 评估结果（nullable）
-    created_at: datetime           # 创建时间
-    completed_at: datetime         # 完成时间（nullable）
-
-class InterviewStatus(str, Enum):
-    CREATED = "created"          # 已创建,未开始
-    IN_PROGRESS = "in_progress"  # 进行中
-    FINISHED = "finished"        # 已完成
-    EVALUATED = "evaluated"      # 已评估
-```
-
-### Answer（回答记录）
-
-```python
-class Answer(Base):
-    id: int                        # 主键
-    interview_id: int              # 关联面试 ID
-    question_index: int            # 题目索引
-    audio_url: str                 # 音频文件路径
-    transcript: str                # 转写文本
-    created_at: datetime
-```
-
-### JobProfile（岗位配置）
-
-```python
-class JobProfile(Base):
-    id: int                        # 主键
-    position_key: str              # 岗位唯一标识（如 backend_engineer）
-    position_name: str             # 岗位展示名称（如 后端工程师）
-    jd_data: JSON                  # JD 结构化数据
-    question_bank: JSON            # 题库列表
-    created_at: datetime
-    updated_at: datetime
-```
-
-#### jd_data 结构
-
-```json
-{
-  "responsibilities": "岗位职责描述",
-  "requirements": "任职要求描述",
-  "plus": "加分项描述",
-  "main_question_count": 3,
-  "followup_limit_per_question": 1,
-  "expected_duration_minutes": 10
-}
-```
-
-#### question_bank 结构
-
-```json
-[
-  {
-    "question_text": "请介绍一下 Python 的 GIL",
-    "reference": "全局解释器锁的概念和影响"
-  },
-  {
-    "question_text": "如何设计一个高并发系统？",
-    "reference": "考察负载均衡、缓存、数据库优化"
-  }
-]
-```
-
-## 🎙️ 音频处理架构
-
-### 前端音频链路
-
-```
-麦克风输入
-  ↓
-getUserMedia() → MediaStream
-  ↓
-AudioContext (24kHz)
-  ↓
-MediaStreamSource
-  ↓
-ScriptProcessorNode (2048 samples)
-  ↓
-Float32Array → PCM16 → Base64
-  ↓
-WebSocket.send()
-```
-
-### 半双工门控策略
-
-```typescript
-// 时间轴控制
-if (audioContext.currentTime < nextStartTimeRef.current + 0.0) {
-  return; // AI 正在说话，阻止发送
-}
-
-// 预锁定机制
-on('response.created') {
-  nextStartTimeRef.current = Math.max(nextStartTimeRef.current, currentTime + 1.5s);
-}
-```
-
-### 后端音频处理（模块化架构）
-
-```
-WebSocket 接收 Base64 (realtime.py)
-  ↓
-SessionRunner 主控
-  ├─ 转发给 OpenAI Realtime API
-  ├─ AudioPipeline 音频管理
-  │   ├─ speech_started: 开始缓存
-  │   └─ speech_stopped: 产生 CandidateSegment
-  ├─ TranscriptStore 转写存储
-  │   └─ 累积对话历史
-  ├─ DecisionEngine 决策引擎
-  │   └─ 判断回合类型和是否需要响应
-  ├─ TurnPlanner 回合规划
-  │   └─ 生成下一回合提示词
-  └─ Persistence 持久化
-       ├─ PCM16 → WAV 封装
-       ├─ 保存到 UPLOAD_DIR
-       └─ 创建 Answer 记录
-```
-
-## 🔌 API 设计
-
-### REST API
-
-| 端点 | 方法 | 说明 |
-|-----|------|------|
-| `/api/interviews/create` | POST | 创建面试 |
-| `/api/interviews/{token}` | GET | 获取面试详情 |
-| `/api/interviews/{token}/complete` | POST | 完成面试并评估 |
-| `/api/job-profiles/upload` | POST | 上传岗位配置 |
-| `/api/job-profiles` | GET | 列出所有岗位 |
-| `/api/admin/login` | POST | HR 登录 |
-| `/api/admin/interviews` | GET | 获取面试列表 |
-
-### WebSocket API
-
-**连接**（开发）：`ws://localhost:8000/api/realtime/ws/{token}`  
-**连接**（生产，同域 HTTPS）：`wss://<DOMAIN>/api/realtime/ws/{token}`（由 Caddy 反代，协议自动升级）
-
-**客户端 → 服务端**：
-
-```json
-{
-  "type": "audio",
-  "audio": "base64_pcm16_data"
-}
-```
-
-**服务端 → 客户端**：
-
-```json
-// AI 音频流
-{
-  "type": "response.audio.delta",
-  "audio": "base64_pcm16_data"
-}
-
-// AI 转写文本
-{
-  "type": "response.audio_transcript.delta",
-  "delta": "你好"
-}
-
-// 会话事件
-{
-  "type": "response.created",
-  ...
-}
-```
-
-## 🛡️ 安全设计
-
-### 1. 身份验证
-
-- **候选人面试**：基于 `link_token`（一次性临时令牌）
-- **HR 后台**：基于 JWT（username + password）
-
-### 2. 数据隔离
-
-- 每个面试使用唯一的 `link_token`
-- `link_token` 采用 `secrets.token_urlsafe(32)`（256位熵）
-- 面试完成后 token 仍有效（用于查看结果）
-
-### 3. API 密钥保护
-
-- `OPENAI_API_KEY` 仅存储在后端环境变量
-- 前端通过 WebSocket Gateway 间接调用 Realtime API
-- 不暴露 API Key 给客户端
-
-### 4. 文件存储安全
-
-- 音频文件存储在 `UPLOAD_DIR`（默认 `backend/app/static/uploads`）
-- 文件名使用 `{token}_{question_index}_{random}.wav` 格式
-- 生产环境建议使用对象存储（S3/OSS）
-
-## 📊 性能优化
-
-### 1. 数据库优化
-
-- `link_token` 字段添加索引（快速查询）
-- `position_key` 字段添加唯一索引
-- 使用连接池管理数据库连接
-
-### 2. 并发处理
-
-- FastAPI 原生支持异步处理
-- WebSocket 连接使用独立的事件循环
-- 推荐使用 Gunicorn + Uvicorn Workers 部署
-
-### 3. 音频流优化
-
-- 前端使用 `ScriptProcessorNode` 实时处理（2048 samples buffer）
-- 后端无缓冲转发（低延迟）
-- OpenAI Realtime API 原生支持流式传输
-
-### 4. 缓存策略
-
-- JobProfile 配置可缓存（Redis）
-- 评估结果缓存在数据库（避免重复计算）
-
-## 🌐 部署架构
-
-### 开发环境
-
-```
-localhost:5173 (Frontend Vite Dev Server)
-    ↓
-localhost:8000 (Backend Uvicorn)
-    ↓
-OpenAI Realtime API
-```
-
-### 生产环境（推荐）
-
-```
-                  ┌─ Frontend (Nginx 静态文件)
-                  │
-Internet → CDN → Nginx (反向代理)
-                  │
-                  └─ Backend (Gunicorn + Uvicorn Workers)
-                      ↓
-                  PostgreSQL
-                      ↓
-                  OpenAI Realtime API
-```
-
-### 生产环境（Docker + Caddy + HTTPS，推荐）
-
-项目提供一键部署脚本，使用 **Caddy** 作为反向代理，自动申请并续期 **Let's Encrypt** 证书，对外提供 HTTPS。复制链接、麦克风/扬声器枚举等依赖浏览器安全上下文，生产环境必须使用 HTTPS。
-
-```
-Internet (80/443)
-    ↓
-Caddy (反向代理 + TLS + ACME 自动续期)
-    ↓
-Frontend (Nginx，仅内网 :80)
-    ↓
-Backend (:8000)
-    ↓
-PostgreSQL / SQLite
-```
-
-- 配置 `.env` 中的 `DOMAIN`、`ACME_EMAIL` 后执行 `./deploy.sh`。
-- WebSocket 在生产环境通过同一域名访问，自动使用 `wss://`。
-
-详见项目根目录 [deploy.md](../deploy.md)。
-
-### Docker 部署（可选）
-
-```yaml
-# 生产推荐：使用项目根目录 docker-compose.yml + Caddy + DOMAIN/ACME_EMAIL
-# 以下为简化示例，实际以仓库内 docker-compose.yml 为准
-version: '3.8'
-services:
-  caddy:
-    image: caddy:alpine
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-    environment:
-      DOMAIN: ${DOMAIN}
-      ACME_EMAIL: ${ACME_EMAIL}
-    depends_on:
-      - frontend
-
-  backend:
-    build: ./backend
-    environment:
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - DATABASE_URL=postgresql://user:pass@db/ai_interview
-    depends_on:
-      - db
-
-  frontend:
-    build: ./frontend
-    # 不暴露端口，由 Caddy 反代
-
-  db:
-    image: postgres:15
-    environment:
-      - POSTGRES_DB=ai_interview
-      - POSTGRES_USER=user
-      - POSTGRES_PASSWORD=pass
-volumes:
-  caddy_data:
-```
-
-## 🔍 监控与日志
-
-### 日志系统
-
-- 统一日志格式（JSON）
-- 不同级别：DEBUG/INFO/WARNING/ERROR
-- 包含关键事件：连接建立、VAD 事件、音频保存、评估完成
-
-详见：[日志模块](05_logging.md)
-
-### 性能监控
-
-- WebSocket 连接数
-- 音频处理延迟
-- OpenAI API 调用耗时
-- 数据库查询性能
-
-## 📚 相关文档
-
-- [快速开始](01_quick_start.md)
-- [实时面试功能](03_features/03.2_realtime_interview.md)
-- [Realtime API 集成](04_technical_details/04.1_realtime_api.md)
-- [音频处理技术](04_technical_details/04.2_audio_processing.md)
+- 旧实现依赖上游端到端语音 `response.*` 驱动；
+- 新实现由后端本地生成 `response.created/response.done` 语义事件，并把 TTS 音频分片下发。
