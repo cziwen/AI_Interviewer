@@ -1,6 +1,6 @@
 from pathlib import Path
 from dotenv import load_dotenv
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 import os
 
 # Load env in a predictable order:
@@ -14,10 +14,17 @@ load_dotenv(PROJECT_ROOT / ".env", override=False)
 load_dotenv(BACKEND_DIR / ".env", override=True)
 
 class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
     ARK_API_KEY: str | None = None
     ARK_BASE_URL: str = os.getenv("ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3")
     ARK_ASR_WS_URL: str = os.getenv("ARK_ASR_WS_URL", "wss://ai-gateway.vei.volces.com/v1/realtime?model=bigmodel")
     ARK_ASR_RESOURCE_ID: str = os.getenv("ARK_ASR_RESOURCE_ID", "")
+    ARK_ASR_MODE: str = os.getenv("ARK_ASR_MODE", "gateway_json")
+    ARK_ASR_APP_ID: str = os.getenv("ARK_ASR_APP_ID", "")
+    ARK_ASR_ACCESS_TOKEN: str = os.getenv("ARK_ASR_ACCESS_TOKEN", "")
+    ARK_ASR_CLUSTER: str = os.getenv("ARK_ASR_CLUSTER", "volcengine_streaming_common")
+    ARK_ASR_SAMPLE_RATE: int = int(os.getenv("ARK_ASR_SAMPLE_RATE", "24000"))
     DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///./ai_interview.db")
     JWT_SECRET: str = os.getenv("JWT_SECRET", "your-secret-key-change-it-in-production")
     ALGORITHM: str = "HS256"
@@ -45,9 +52,6 @@ class Settings(BaseSettings):
     REALTIME_DECISION_MAX_CHARS: int = int(os.getenv("REALTIME_DECISION_MAX_CHARS", "1200"))
     ADMIN_USERNAME: str = os.getenv("ADMIN_USERNAME", "admin")
     ADMIN_PASSWORD: str = os.getenv("ADMIN_PASSWORD", "admin123")
-
-    class Config:
-        env_file = ".env"
 
 settings = Settings()
 

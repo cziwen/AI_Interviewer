@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import re
@@ -28,6 +29,7 @@ from .audio_chunker import AudioChunker
 from .audio_pipeline import AudioPipeline
 from .decision_engine import DecisionEngine, clamp_text
 from .persistence import persist_audio_and_answer_sync
+from .openspeech_asr_protocol import OpenSpeechAsrProtocol
 from .response_generator import GeneratedResponse, ResponseGenerator
 from .state import PipelineStage, SessionState
 from .transcript_store import TranscriptStore
@@ -54,6 +56,10 @@ class RealtimeSessionRunner:
         self.response_generator = ResponseGenerator(settings.ARK_API_KEY)
         self.tts_synthesizer = TtsSynthesizer(settings.ARK_API_KEY)
         self.transcript_store = TranscriptStore(self.orchestrator)
+        self.asr_mode = (settings.ARK_ASR_MODE or "gateway_json").strip().lower()
+        if self.asr_mode == "gateway_json" and settings.ARK_ASR_APP_ID and settings.ARK_ASR_ACCESS_TOKEN:
+            # Auto-upgrade to sauc v3 mode when explicit app credentials are provided.
+            self.asr_mode = "sauc_v3"
 
         self.jd_info = "暂无详细岗位要求"
         self.main_question_count = 3
@@ -114,9 +120,22 @@ class RealtimeSessionRunner:
             interview_token=self.token,
             source="api.realtime",
         )
-        headers = {"Authorization": f"Bearer {settings.ARK_API_KEY}"}
-        if settings.ARK_ASR_RESOURCE_ID:
-            headers["X-Resource-Id"] = settings.ARK_ASR_RESOURCE_ID
+        headers: dict[str, str] = {}
+        if self.asr_mode in {"openspeech_v2", "sauc_v3"}:
+            token = settings.ARK_ASR_ACCESS_TOKEN or settings.ARK_API_KEY or ""
+            if self.asr_mode == "openspeech_v2":
+                if token:
+                    headers["Authorization"] = f"Bearer;{token}"
+            else:
+                headers["X-Api-App-Key"] = settings.ARK_ASR_APP_ID
+                headers["X-Api-Access-Key"] = token
+                headers["X-Api-Connect-Id"] = f"{self.token}-{int(time.time() * 1000)}"
+                if settings.ARK_ASR_RESOURCE_ID:
+                    headers["X-Api-Resource-Id"] = settings.ARK_ASR_RESOURCE_ID
+        else:
+            headers["Authorization"] = f"Bearer {settings.ARK_API_KEY}"
+            if settings.ARK_ASR_RESOURCE_ID:
+                headers["X-Resource-Id"] = settings.ARK_ASR_RESOURCE_ID
         self.upstream_ws = await websockets.connect(settings.ARK_ASR_WS_URL, additional_headers=headers)
         log_interview_event(
             event_name="asr.connected",
@@ -126,6 +145,16 @@ class RealtimeSessionRunner:
         )
 
     async def _send_asr_session_update(self) -> None:
+        if self.asr_mode in {"openspeech_v2", "sauc_v3"}:
+            packet = OpenSpeechAsrProtocol.build_full_request(
+                app_id=settings.ARK_ASR_APP_ID,
+                access_token=settings.ARK_ASR_ACCESS_TOKEN,
+                cluster=settings.ARK_ASR_CLUSTER,
+                sample_rate=settings.ARK_ASR_SAMPLE_RATE,
+            )
+            await self.upstream_ws.send(packet)
+            await asyncio.sleep(0.05)
+            return
         self.init_event = {
             "type": "session.update",
             "session": {
@@ -227,7 +256,12 @@ class RealtimeSessionRunner:
         if resolved_item_id and resolved_item_id == self.state.last_committed_item_id:
             return False
 
-        await self.upstream_ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
+        if self.asr_mode in {"openspeech_v2", "sauc_v3"}:
+            # In openspeech_v2, end-of-utterance is represented by sending last audio frame.
+            self.state.commit_pending = False
+            return True
+        else:
+            await self.upstream_ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
         self.state.commit_pending = True
         return True
 
@@ -501,12 +535,25 @@ class RealtimeSessionRunner:
                 msg_type = data.get("type")
                 if msg_type == "audio":
                     audio_data = data["audio"]
+                    if not self.state.candidate_speaking:
+                        self.audio_pipeline.on_speech_started(self._ensure_item_id(None))
                     self.audio_pipeline.on_client_audio(audio_data)
-                    await self.upstream_ws.send(json.dumps({"type": "input_audio_buffer.append", "audio": audio_data}))
+                    if self.asr_mode in {"openspeech_v2", "sauc_v3"}:
+                        pcm = base64.b64decode(audio_data)
+                        packet = OpenSpeechAsrProtocol.build_audio_request(pcm, is_last=False)
+                        await self.upstream_ws.send(packet)
+                    else:
+                        await self.upstream_ws.send(json.dumps({"type": "input_audio_buffer.append", "audio": audio_data}))
                 elif msg_type == "end_turn":
+                    segment = None
+                    if self.state.candidate_speaking:
+                        segment = self.audio_pipeline.on_speech_stopped(self._ensure_item_id(self.state.current_input_item_id))
+                    if self.asr_mode in {"openspeech_v2", "sauc_v3"}:
+                        packet = OpenSpeechAsrProtocol.build_audio_request(b"", is_last=True)
+                        await self.upstream_ws.send(packet)
                     await self._finalize_candidate_segment(
                         trigger="client_end_turn",
-                        segment_pcm=None,
+                        segment_pcm=segment.pcm_data if segment else None,
                         item_id=self.state.current_input_item_id,
                     )
                 elif msg_type == "no_response_timeout":
@@ -533,19 +580,40 @@ class RealtimeSessionRunner:
                 error_message=str(exc),
             )
 
-    def _normalize_upstream_event(self, raw_event: dict[str, Any]) -> Optional[StandardAsrEvent]:
-        return AsrAdapter.normalize_event(raw_event)
+    def _normalize_upstream_event(self, raw_event: Any) -> Optional[StandardAsrEvent]:
+        if self.asr_mode in {"openspeech_v2", "sauc_v3"}:
+            if isinstance(raw_event, (bytes, bytearray)):
+                parsed = OpenSpeechAsrProtocol.parse_server_message(bytes(raw_event))
+                if not parsed:
+                    return None
+                kind = parsed.get("kind")
+                if kind == "error":
+                    return StandardAsrEvent(kind="error", error=parsed.get("error") or {})
+                if kind == "transcript_completed":
+                    return StandardAsrEvent(
+                        kind="transcript_completed",
+                        item_id=self.state.current_input_item_id,
+                        transcript=str(parsed.get("transcript") or ""),
+                    )
+                return None
+            if isinstance(raw_event, dict):
+                return AsrAdapter.normalize_event(raw_event)
+            return None
+        return AsrAdapter.normalize_event(raw_event if isinstance(raw_event, dict) else {})
 
     async def _relay_upstream_to_client(self) -> None:
         try:
             async for message in self.upstream_ws:
-                normalized = self._normalize_upstream_event(json.loads(message))
+                if self.asr_mode in {"openspeech_v2", "sauc_v3"}:
+                    normalized = self._normalize_upstream_event(message)
+                else:
+                    normalized = self._normalize_upstream_event(json.loads(message))
                 if not normalized:
                     continue
 
                 if normalized.kind == "error":
                     err = normalized.error or {}
-                    if err.get("code") == "input_audio_buffer_commit_empty":
+                    if err.get("code") in {"input_audio_buffer_commit_empty", "45000010", "45000030", "45000000"}:
                         self.state.commit_pending = False
                         self.state.has_uncommitted_audio = False
                     await self.websocket.send_text(json.dumps({"type": "error", "error": err}))
