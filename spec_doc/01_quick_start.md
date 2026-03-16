@@ -164,6 +164,8 @@ curl -X POST http://localhost:8000/api/interviews/create \
 
 ### 可选配置（有默认值）
 
+#### 基础配置
+
 | 变量 | 说明 | 默认值 |
 |-----|------|--------|
 | `DATABASE_URL` | 数据库连接 | `sqlite:///./ai_interview.db` |
@@ -171,6 +173,28 @@ curl -X POST http://localhost:8000/api/interviews/create \
 | `ADMIN_PASSWORD` | 管理员密码 | `admin123` |
 | `JWT_SECRET` | JWT 签名密钥 | `local-dev-secret-change-in-production` |
 | `UPLOAD_DIR` | 音频文件存储目录 | `./app/static/uploads` |
+
+#### Realtime 面试配置（高级）
+
+| 变量 | 说明 | 默认值 |
+|-----|------|--------|
+| `REALTIME_MODEL` | Realtime API 模型 | `gpt-4o-realtime-preview-2024-12-17` |
+| `STT_MODEL` | STT 转写模型（评估阶段） | `whisper-1` |
+| `EVAL_LLM_MODEL` | 评估 LLM 模型 | `gpt-4o-mini` |
+| `REALTIME_STRICT_PROMPT_ENABLED` | 启用严格提示检查 | `true` |
+| `REALTIME_CONTEXT_RESET_MODE` | 上下文重置模式（none/per_question） | `none` |
+| `REALTIME_MIN_MAIN_ANSWER_CHARS` | 主问题最小回答字符数 | `20` |
+| `REALTIME_MAIN_ANSWER_CONFIRM_WORDS` | 主问题确认关键词 | `下一题,下一个,换一题` |
+
+#### 决策层配置（高级）
+
+| 变量 | 说明 | 默认值 |
+|-----|------|--------|
+| `REALTIME_DECISION_LAYER_ENABLED` | 启用决策层 | `true` |
+| `REALTIME_DECISION_TIMEOUT_MS` | 决策超时时间（毫秒） | `3000` |
+| `REALTIME_DECISION_HISTORY_TURNS` | 决策历史回合数 | `4` |
+| `REALTIME_DECISION_MAX_CHARS` | 决策最大字符数 | `1500` |
+| `REALTIME_DECISION_MODEL` | 决策层模型 | `gpt-4o-mini` |
 
 ## ⚠️ 常见问题
 
