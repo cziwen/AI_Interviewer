@@ -64,7 +64,10 @@ def decision_action_to_turn_kind(action: str) -> Optional[TurnKind]:
 
 class DecisionEngine:
     def __init__(self, api_key: Optional[str]):
-        self._client = openai.AsyncOpenAI(api_key=api_key) if api_key else None
+        self._client = (
+            openai.AsyncOpenAI(api_key=api_key, base_url=settings.ARK_BASE_URL)
+            if api_key else None
+        )
 
     async def call_decision_llm(self, context: dict[str, Any]) -> tuple[Optional[dict], Optional[str], int]:
         if not self._client:
@@ -97,7 +100,7 @@ class DecisionEngine:
         try:
             response = await asyncio.wait_for(
                 self._client.chat.completions.create(
-                    model=settings.REALTIME_DECISION_MODEL,
+                    model=settings.ARK_LLM_MODEL,
                     messages=[
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt},

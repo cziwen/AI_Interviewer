@@ -6,7 +6,7 @@
 git clone <your_repo_url>
 cd AI_Interviewer
 cp .env.example .env
-# 编辑 .env，至少填 OPENAI_API_KEY / JWT_SECRET / ADMIN_PASSWORD / DOMAIN / ACME_EMAIL
+# 编辑 .env，至少填 ARK_API_KEY / JWT_SECRET / ADMIN_PASSWORD / DOMAIN / ACME_EMAIL
 ./deploy.sh
 ```
 
@@ -81,7 +81,7 @@ docker compose down
 ## 最小检查清单
 
 - ECS 安全组已放行：`80`、`443`（如启用 Postgres 再放行 `5432`）
-- `.env` 已正确设置 `OPENAI_API_KEY`
+- `.env` 已正确设置 `ARK_API_KEY`
 - `.env` 已正确设置 `DOMAIN` 与 `ACME_EMAIL`
 - 前后端均走同域（`/` + `/api`），后端 `8000` 不再对公网暴露
 - 访问使用 `https://<DOMAIN>`，证书自动续期由 Caddy 管理

@@ -14,7 +14,10 @@ load_dotenv(PROJECT_ROOT / ".env", override=False)
 load_dotenv(BACKEND_DIR / ".env", override=True)
 
 class Settings(BaseSettings):
-    OPENAI_API_KEY: str | None = None
+    ARK_API_KEY: str | None = None
+    ARK_BASE_URL: str = os.getenv("ARK_BASE_URL", "https://ark.cn-beijing.volces.com/api/v3")
+    ARK_ASR_WS_URL: str = os.getenv("ARK_ASR_WS_URL", "wss://ai-gateway.vei.volces.com/v1/realtime?model=bigmodel")
+    ARK_ASR_RESOURCE_ID: str = os.getenv("ARK_ASR_RESOURCE_ID", "")
     DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///./ai_interview.db")
     JWT_SECRET: str = os.getenv("JWT_SECRET", "your-secret-key-change-it-in-production")
     ALGORITHM: str = "HS256"
@@ -22,11 +25,16 @@ class Settings(BaseSettings):
     UPLOAD_DIR: str = os.getenv("UPLOAD_DIR", "./app/static/uploads")
     
     # Models for background tasks
-    STT_MODEL: str = os.getenv("STT_MODEL", "gpt-4o-mini-transcribe")
-    EVAL_LLM_MODEL: str = os.getenv("EVAL_LLM_MODEL", "gpt-4o-mini")
+    ARK_LLM_MODEL: str = os.getenv("ARK_LLM_MODEL", "doubao-seed-2-0-mini-260215")
+    ARK_STT_MODEL: str = os.getenv("ARK_STT_MODEL", "Doubao-语音识别")
+    ARK_CHAT_MODEL: str = os.getenv("ARK_CHAT_MODEL", os.getenv("ARK_LLM_MODEL", "doubao-seed-2-0-mini-260215"))
+    ARK_EVAL_MODEL: str = os.getenv("ARK_EVAL_MODEL", os.getenv("ARK_LLM_MODEL", "doubao-seed-2-0-mini-260215"))
+    ARK_DECISION_MODEL: str = os.getenv("ARK_DECISION_MODEL", os.getenv("ARK_LLM_MODEL", "doubao-seed-2-0-mini-260215"))
+    ARK_TTS_MODEL: str = os.getenv("ARK_TTS_MODEL", "Doubao-语音合成")
+    ARK_TTS_VOICE: str = os.getenv("ARK_TTS_VOICE", "zh_female_meilinvyou_moon_bigtts")
+    ARK_TTS_SAMPLE_RATE: int = int(os.getenv("ARK_TTS_SAMPLE_RATE", "24000"))
     
     # Realtime Interview Settings
-    REALTIME_MODEL: str = os.getenv("REALTIME_MODEL", "gpt-realtime-mini")
     REALTIME_STRICT_PROMPT_ENABLED: bool = os.getenv("REALTIME_STRICT_PROMPT_ENABLED", "true").lower() == "true"
     REALTIME_CONTEXT_RESET_MODE: str = os.getenv("REALTIME_CONTEXT_RESET_MODE", "per_main_question") # none, per_main_question
     REALTIME_MIN_MAIN_ANSWER_CHARS: int = int(os.getenv("REALTIME_MIN_MAIN_ANSWER_CHARS", "12"))
@@ -35,8 +43,6 @@ class Settings(BaseSettings):
     REALTIME_DECISION_TIMEOUT_MS: int = int(os.getenv("REALTIME_DECISION_TIMEOUT_MS", "5000"))
     REALTIME_DECISION_HISTORY_TURNS: int = int(os.getenv("REALTIME_DECISION_HISTORY_TURNS", "3"))
     REALTIME_DECISION_MAX_CHARS: int = int(os.getenv("REALTIME_DECISION_MAX_CHARS", "1200"))
-    REALTIME_DECISION_MODEL: str = os.getenv("REALTIME_DECISION_MODEL", "gpt-4o-mini")
-    
     ADMIN_USERNAME: str = os.getenv("ADMIN_USERNAME", "admin")
     ADMIN_PASSWORD: str = os.getenv("ADMIN_PASSWORD", "admin123")
 

@@ -186,12 +186,12 @@ ensure_env_file() {
   cp .env.example .env
   log "Created .env from .env.example"
 
-  read -r -p "Enter OPENAI_API_KEY (leave empty to edit manually later): " input_key || true
+  read -r -p "Enter ARK_API_KEY (leave empty to edit manually later): " input_key || true
   if [[ -n "${input_key:-}" ]]; then
-    sed -i.bak "s|^OPENAI_API_KEY=.*|OPENAI_API_KEY=${input_key}|" .env && rm -f .env.bak
-    log "OPENAI_API_KEY has been written to .env"
+    sed -i.bak "s|^ARK_API_KEY=.*|ARK_API_KEY=${input_key}|" .env && rm -f .env.bak
+    log "ARK_API_KEY has been written to .env"
   else
-    log "Please edit .env and set OPENAI_API_KEY before production use."
+    log "Please edit .env and set ARK_API_KEY before production use."
   fi
 }
 

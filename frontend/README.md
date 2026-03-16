@@ -68,7 +68,7 @@ ws.onmessage = (event) => {
 ```
 
 #### 音频采集与处理
-- **采样率**：24kHz（匹配 OpenAI Realtime API）
+- **采样率**：24kHz（匹配 Realtime API）
 - **格式**：PCM16（16-bit Linear PCM）
 - **处理链路**：
   ```

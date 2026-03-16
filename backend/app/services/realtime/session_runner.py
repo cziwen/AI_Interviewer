@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 import logging
 import re
@@ -24,14 +23,16 @@ from ..realtime_turn_orchestrator import (
     TurnPlan,
     TurnStatus,
 )
+from .asr_adapter import AsrAdapter, StandardAsrEvent
+from .audio_chunker import AudioChunker
 from .audio_pipeline import AudioPipeline
 from .decision_engine import DecisionEngine, clamp_text
 from .persistence import persist_audio_and_answer_sync
+from .response_generator import GeneratedResponse, ResponseGenerator
 from .state import PipelineStage, SessionState
 from .transcript_store import TranscriptStore
+from .tts_synthesizer import TtsSynthesizer
 from .turn_planner import PlannerDeps, TurnPlanner
-
-OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime?model=gpt-realtime-mini"
 
 
 class RealtimeSessionRunner:
@@ -40,7 +41,7 @@ class RealtimeSessionRunner:
         self.token = token
         self.interview = interview
         self.job_profile = job_profile
-        self.openai_ws = None
+        self.upstream_ws = None
         self.init_event: dict[str, Any] = {}
         self.pipeline_lock = asyncio.Lock()
         self.usage_tracker = InterviewUsageTracker(interview_id=interview.id, interview_token=token)
@@ -49,7 +50,9 @@ class RealtimeSessionRunner:
             candidate_name=interview.name or "候选人",
             position=interview.position or "基础岗位",
         )
-        self.decision_engine = DecisionEngine(settings.OPENAI_API_KEY)
+        self.decision_engine = DecisionEngine(settings.ARK_API_KEY)
+        self.response_generator = ResponseGenerator(settings.ARK_API_KEY)
+        self.tts_synthesizer = TtsSynthesizer(settings.ARK_API_KEY)
         self.transcript_store = TranscriptStore(self.orchestrator)
 
         self.jd_info = "暂无详细岗位要求"
@@ -65,10 +68,10 @@ class RealtimeSessionRunner:
         await self.websocket.accept()
         self._load_job_profile()
         self._init_runtime_state()
-        await self._connect_openai()
-        await self._send_session_update()
+        await self._connect_asr_upstream()
+        await self._send_asr_session_update()
         await self._send_intro_turn()
-        await asyncio.gather(self._relay_client_to_openai(), self._relay_openai_to_client())
+        await asyncio.gather(self._relay_client_to_upstream(), self._relay_upstream_to_client())
 
     def _load_job_profile(self) -> None:
         if self.job_profile:
@@ -104,64 +107,30 @@ class RealtimeSessionRunner:
         self.state = state
         self.audio_pipeline = AudioPipeline(state)
 
-    async def _connect_openai(self) -> None:
+    async def _connect_asr_upstream(self) -> None:
         log_interview_event(
-            event_name="openai.connecting",
+            event_name="asr.connecting",
             interview_id=self.interview.id,
             interview_token=self.token,
             source="api.realtime",
         )
-        self.openai_ws = await websockets.connect(
-            OPENAI_REALTIME_URL,
-            additional_headers={
-                "Authorization": f"Bearer {settings.OPENAI_API_KEY}",
-                "OpenAI-Beta": "realtime=v1",
-            },
-        )
+        headers = {"Authorization": f"Bearer {settings.ARK_API_KEY}"}
+        if settings.ARK_ASR_RESOURCE_ID:
+            headers["X-Resource-Id"] = settings.ARK_ASR_RESOURCE_ID
+        self.upstream_ws = await websockets.connect(settings.ARK_ASR_WS_URL, additional_headers=headers)
         log_interview_event(
-            event_name="openai.connected",
+            event_name="asr.connected",
             interview_id=self.interview.id,
             interview_token=self.token,
             source="api.realtime",
         )
 
-    async def _send_session_update(self) -> None:
-        formatted_questions = []
-        for question in self.interview.question_set:
-            ref = question.get("reference")
-            ref_text = f"（参考方向/要点：{ref}）" if ref else "（开放题，无固定参考方向）"
-            formatted_questions.append(f"题目 {question['order_index']}：{question['question_text']} {ref_text}")
-        questions_str = "\n".join(formatted_questions)
-
+    async def _send_asr_session_update(self) -> None:
         self.init_event = {
             "type": "session.update",
             "session": {
-                "instructions": f"""
-你是一名专业的 AI 面试官。你正在面试候选人 {self.interview.name or '先生/女士'}，岗位是 {self.interview.position or '基础岗位'}。
-
-岗位背景信息 (JD)：
-{self.jd_info}
-
-本次面试流程：
-1. 自我介绍 (intro)。
-2. 主问题问答 (qa)。
-3. 自然结束 (closing)。
-
-本次面试规则与参数：
-1. 主问题数量：{self.main_question_count}
-2. 追问限额：每题最多 {self.followup_limit} 次
-3. 预期时长：{self.expected_duration} 分钟
-4. 每次只问一个问题
-5. 请使用中文
-
-题目列表与参考方向：
-{questions_str}
-""",
-                "voice": "alloy",
-                "modalities": ["text", "audio"],
                 "input_audio_format": "pcm16",
-                "output_audio_format": "pcm16",
-                "input_audio_transcription": {"model": "whisper-1"},
+                "input_audio_transcription": {"model": settings.ARK_STT_MODEL},
                 "turn_detection": {
                     "type": "server_vad",
                     "threshold": 0.5,
@@ -171,8 +140,10 @@ class RealtimeSessionRunner:
                 },
             },
         }
-        await self.openai_ws.send(json.dumps(self.init_event))
-        await asyncio.sleep(0.3)
+        if settings.ARK_ASR_RESOURCE_ID:
+            self.init_event["session"]["resource_id"] = settings.ARK_ASR_RESOURCE_ID
+        await self.upstream_ws.send(json.dumps(self.init_event))
+        await asyncio.sleep(0.15)
 
     def _build_planner(self) -> TurnPlanner:
         deps = PlannerDeps(
@@ -237,8 +208,17 @@ class RealtimeSessionRunner:
         if len(self.state.recent_dialogue_turns) > max_entries:
             del self.state.recent_dialogue_turns[:-max_entries]
 
+    def _ensure_item_id(self, item_id: Optional[str]) -> str:
+        if item_id:
+            return item_id
+        if self.state.current_input_item_id:
+            return self.state.current_input_item_id
+        generated = f"asr_item_{int(time.time() * 1000)}"
+        self.state.current_input_item_id = generated
+        return generated
+
     async def _commit_input_audio_once(self, reason: str, item_id: Optional[str] = None) -> bool:
-        resolved_item_id = item_id or self.state.current_input_item_id
+        resolved_item_id = self._ensure_item_id(item_id)
         if not self.state.has_uncommitted_audio:
             self._log_turn_state("COMMIT_SKIPPED_NO_AUDIO", {"reason": reason, "item_id": resolved_item_id})
             return False
@@ -247,20 +227,21 @@ class RealtimeSessionRunner:
         if resolved_item_id and resolved_item_id == self.state.last_committed_item_id:
             return False
 
-        await self.openai_ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
+        await self.upstream_ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
         self.state.commit_pending = True
         return True
 
     async def _wait_and_log_transcript(self, item_id: Optional[str]) -> str:
-        transcript, waited_ms = await self.transcript_store.wait_for_user_transcript(item_id)
+        resolved_item_id = self._ensure_item_id(item_id)
+        transcript, waited_ms = await self.transcript_store.wait_for_user_transcript(resolved_item_id)
         if transcript:
             self._log_turn_state(
                 "pipeline.transcribed",
-                {"item_id": item_id, "waited_ms": waited_ms, "chars": len(transcript)},
+                {"item_id": resolved_item_id, "waited_ms": waited_ms, "chars": len(transcript)},
             )
             self.state.pipeline_stage = PipelineStage.TRANSCRIBED
             return transcript
-        self._log_turn_state("pipeline.transcription_timeout", {"item_id": item_id, "waited_ms": waited_ms})
+        self._log_turn_state("pipeline.transcription_timeout", {"item_id": resolved_item_id, "waited_ms": waited_ms})
         return ""
 
     async def _decide_next_turn(self) -> Optional[TurnPlan]:
@@ -288,6 +269,58 @@ class RealtimeSessionRunner:
         self.state.pipeline_stage = PipelineStage.DECIDED
         return plan
 
+    async def _emit_generated_response(
+        self,
+        response_id: str,
+        generated: GeneratedResponse,
+    ) -> dict[str, int]:
+        usage = {
+            "input_tokens": generated.input_tokens,
+            "output_tokens": generated.output_tokens,
+        }
+        if usage["input_tokens"] or usage["output_tokens"]:
+            self.usage_tracker.add_text_usage(
+                model_name=settings.ARK_LLM_MODEL,
+                input_tokens=usage["input_tokens"],
+                output_tokens=usage["output_tokens"],
+            )
+
+        text = generated.text.strip()
+        if text:
+            self.orchestrator.append_transcript_delta(response_id, text)
+            await self.websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "response.audio_transcript.delta",
+                        "response_id": response_id,
+                        "delta": text,
+                    }
+                )
+            )
+
+        pcm_data = await self.tts_synthesizer.synthesize(text)
+        if pcm_data:
+            self.usage_tracker.add_audio_usage(
+                model_name=settings.ARK_TTS_MODEL,
+                output_seconds=len(pcm_data) / 48000.0,
+            )
+            for chunk in AudioChunker.iter_chunks(
+                pcm_data,
+                chunk_ms=120,
+                sample_rate=settings.ARK_TTS_SAMPLE_RATE,
+            ):
+                await self.websocket.send_text(
+                    json.dumps(
+                        {
+                            "type": "response.audio.delta",
+                            "response_id": response_id,
+                            "delta": chunk,
+                            "audio": chunk,
+                        }
+                    )
+                )
+        return usage
+
     async def _send_response_create_with_turn(self, plan: TurnPlan) -> None:
         if self.orchestrator.has_pending_turn():
             self._log_turn_state("AI_RESPONSE_CREATE_SKIPPED", {"reason": "pending_turn"})
@@ -299,16 +332,93 @@ class RealtimeSessionRunner:
             question_order=self.state.current_main_question_order,
         )
         self.state.pending_plan = plan
-        await self.openai_ws.send(
+        self.state.pipeline_stage = PipelineStage.RESPONDING
+
+        response_id = f"srv_resp_{turn.turn_id}_{int(time.time() * 1000)}"
+        self.orchestrator.bind_response(response_id)
+        await self.websocket.send_text(
             json.dumps(
                 {
-                    "type": "response.create",
-                    "response": {"instructions": plan.control_instruction},
+                    "type": "response.created",
+                    "response": {"id": response_id, "status": "in_progress"},
                 }
             )
         )
-        self._log_turn_state("pipeline.responding", {"turn_id": turn.turn_id, "turn_kind": turn.turn_kind.value})
-        self.state.pipeline_stage = PipelineStage.RESPONDING
+        self._log_turn_state("AI_RESPONSE_CREATED", {"response_id": response_id, "turn_id": turn.turn_id})
+
+        try:
+            generated = await self.response_generator.generate(
+                control_instruction=plan.control_instruction,
+                candidate_name=self.interview.name or "候选人",
+                position=self.interview.position or "基础岗位",
+            )
+            usage = await self._emit_generated_response(response_id, generated)
+            done_turn = self.orchestrator.complete_turn(response_id, usage)
+            if done_turn and done_turn.turn_kind == TurnKind.MAIN_PROMPT and done_turn.status == TurnStatus.COMPLETED:
+                q_order = done_turn.target_question_order or self.state.current_main_question_order
+                aligned = self._is_main_question_aligned(q_order, done_turn.transcript)
+                if not aligned and settings.REALTIME_STRICT_PROMPT_ENABLED:
+                    planner = self._build_planner()
+                    reask = TurnPlan(
+                        turn_kind=TurnKind.REASK_PROMPT,
+                        stage_after_completion=self.state.current_stage,
+                        question_order_after_completion=q_order,
+                        expected_reply_after_completion=done_turn.target_expected_reply or self.state.expected_candidate_reply_for,
+                        control_instruction=(
+                            "[INTERVIEW_STAGE] drift_correction\n"
+                            f"[INSTRUCTION] 刚才跑题了。请重述主问题第{q_order}题："
+                            f"{(planner.get_main_question(q_order) or {}).get('question_text', '').strip()}"
+                        ),
+                        advance_main_completed=False,
+                        next_followups_used=self.state.followups_used_for_current,
+                        next_clarifies_used=self.state.clarifies_used_for_current,
+                    )
+                    self.state.pending_plan = None
+                    await self._send_response_create_with_turn(reask)
+                    return
+
+            if done_turn and self.state.pending_plan and self.orchestrator.should_advance_business_state(done_turn):
+                transition = self.orchestrator.create_business_transition(self.state.pending_plan, done_turn)
+                self._apply_business_transition(transition)
+                self.state.pending_plan = None
+            if done_turn and done_turn.transcript:
+                log_dialogue_line(interview_token=self.token, role="AI", text=done_turn.transcript)
+                self._add_dialogue_turn("AI", done_turn.transcript)
+
+            await self.websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "response.done",
+                        "response": {"id": response_id, "status": "completed", "usage": usage},
+                    }
+                )
+            )
+        except Exception as exc:
+            self.orchestrator.fail_turn(response_id, "response_generation_failed", str(exc))
+            self.state.pending_plan = None
+            await self.websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "error",
+                        "error": {"code": "response_generation_failed", "message": str(exc)},
+                    }
+                )
+            )
+            await self.websocket.send_text(
+                json.dumps(
+                    {
+                        "type": "response.done",
+                        "response": {
+                            "id": response_id,
+                            "status": "failed",
+                            "status_details": {"error": {"code": "response_generation_failed", "message": str(exc)}},
+                        },
+                    }
+                )
+            )
+        finally:
+            if self.state.pipeline_stage == PipelineStage.RESPONDING:
+                self.state.pipeline_stage = PipelineStage.IDLE
 
     def _apply_business_transition(self, transition: Optional[BusinessTransition]) -> None:
         if not transition:
@@ -332,16 +442,18 @@ class RealtimeSessionRunner:
                 return
             self.state.decision_pending = True
             try:
-                self._log_turn_state("pipeline.segment_started", {"trigger": trigger, "item_id": item_id})
-                await self._commit_input_audio_once(f"linear_finalize:{trigger}", item_id)
+                resolved_item_id = self._ensure_item_id(item_id)
+                self._log_turn_state("pipeline.segment_started", {"trigger": trigger, "item_id": resolved_item_id})
+                await self._commit_input_audio_once(f"linear_finalize:{trigger}", resolved_item_id)
                 self.state.pipeline_stage = PipelineStage.COMMITTED
-                self._log_turn_state("pipeline.committed", {"item_id": item_id})
+                self._log_turn_state("pipeline.committed", {"item_id": resolved_item_id})
+
+                transcript = await self._wait_and_log_transcript(resolved_item_id)
 
                 if segment_pcm:
                     answer_idx = 0
                     if self.state.expected_candidate_reply_for in ("main", "followup") and self.state.current_main_question_order > 0:
                         answer_idx = self.state.current_main_question_order
-                    transcript = self.transcript_store.get_user_transcript(item_id)
                     try:
                         file_path = await asyncio.to_thread(
                             persist_audio_and_answer_sync,
@@ -370,11 +482,10 @@ class RealtimeSessionRunner:
                             error_message=str(exc),
                         )
                     self.usage_tracker.add_audio_usage(
-                        model_name="gpt-realtime-mini",
+                        model_name=settings.ARK_STT_MODEL,
                         input_seconds=len(segment_pcm) / 48000.0,
                     )
 
-                await self._wait_and_log_transcript(item_id)
                 plan = await self._decide_next_turn()
                 if plan:
                     await self._send_response_create_with_turn(plan)
@@ -383,7 +494,7 @@ class RealtimeSessionRunner:
                 if self.state.pipeline_stage != PipelineStage.RESPONDING:
                     self.state.pipeline_stage = PipelineStage.IDLE
 
-    async def _relay_client_to_openai(self) -> None:
+    async def _relay_client_to_upstream(self) -> None:
         try:
             async for message in self.websocket.iter_text():
                 data = json.loads(message)
@@ -391,7 +502,7 @@ class RealtimeSessionRunner:
                 if msg_type == "audio":
                     audio_data = data["audio"]
                     self.audio_pipeline.on_client_audio(audio_data)
-                    await self.openai_ws.send(json.dumps({"type": "input_audio_buffer.append", "audio": audio_data}))
+                    await self.upstream_ws.send(json.dumps({"type": "input_audio_buffer.append", "audio": audio_data}))
                 elif msg_type == "end_turn":
                     await self._finalize_candidate_segment(
                         trigger="client_end_turn",
@@ -413,7 +524,7 @@ class RealtimeSessionRunner:
                         await self._send_response_create_with_turn(reask_plan)
         except Exception as exc:
             log_interview_event(
-                event_name="relay.client_to_openai.error",
+                event_name="relay.client_to_asr.error",
                 interview_id=self.interview.id,
                 interview_token=self.token,
                 source="api.realtime",
@@ -422,133 +533,56 @@ class RealtimeSessionRunner:
                 error_message=str(exc),
             )
 
-    async def _relay_openai_to_client(self) -> None:
+    def _normalize_upstream_event(self, raw_event: dict[str, Any]) -> Optional[StandardAsrEvent]:
+        return AsrAdapter.normalize_event(raw_event)
+
+    async def _relay_upstream_to_client(self) -> None:
         try:
-            async for message in self.openai_ws:
-                event = json.loads(message)
-                event_type = event.get("type")
-
-                if event_type in ["response.audio.delta", "response.text.delta", "response.audio_transcript.delta"]:
-                    if event_type == "response.audio.delta":
-                        delta_audio = event.get("delta", "")
-                        if delta_audio:
-                            pcm_bytes = base64.b64decode(delta_audio)
-                            self.usage_tracker.add_audio_usage(
-                                model_name="gpt-realtime-mini",
-                                output_seconds=len(pcm_bytes) / 48000.0,
-                            )
-                        modified_event = event.copy()
-                        if "delta" in modified_event:
-                            modified_event["audio"] = modified_event["delta"]
-                        await self.websocket.send_text(json.dumps(modified_event))
-                    else:
-                        await self.websocket.send_text(json.dumps(event))
-                    if event_type == "response.audio_transcript.delta":
-                        response_id = event.get("response_id")
-                        if response_id:
-                            self.orchestrator.append_transcript_delta(response_id, event.get("delta", ""))
+            async for message in self.upstream_ws:
+                normalized = self._normalize_upstream_event(json.loads(message))
+                if not normalized:
                     continue
 
-                if event_type == "response.created":
-                    response = event.get("response", {})
-                    response_id = response.get("id")
-                    if response_id:
-                        turn = self.orchestrator.bind_response(response_id)
-                        if turn:
-                            self._log_turn_state("AI_RESPONSE_CREATED", {"response_id": response_id, "turn_id": turn.turn_id})
-                    await self.websocket.send_text(json.dumps(event))
-                    continue
-
-                if event_type == "conversation.item.input_audio_transcription.completed":
-                    item_id = event.get("item_id")
-                    transcript = event.get("transcript", "")
-                    if transcript:
-                        self.transcript_store.set_user_transcript(item_id, transcript)
-                        log_dialogue_line(interview_token=self.token, role="Candidate", text=transcript)
-                        self._add_dialogue_turn("Candidate", transcript)
-                    continue
-
-                if event_type == "response.done":
-                    response = event.get("response", {})
-                    response_id = response.get("id")
-                    status = response.get("status")
-                    status_details = response.get("status_details", {})
-                    usage = response.get("usage")
-                    if usage:
-                        self.usage_tracker.add_text_usage(
-                            model_name="gpt-realtime-mini",
-                            input_tokens=usage.get("input_tokens", 0),
-                            output_tokens=usage.get("output_tokens", 0),
-                        )
-                    if status == "completed":
-                        turn = self.orchestrator.complete_turn(response_id, usage)
-                        if turn:
-                            if turn.turn_kind == TurnKind.MAIN_PROMPT and turn.status == TurnStatus.COMPLETED:
-                                q_order = turn.target_question_order or self.state.current_main_question_order
-                                aligned = self._is_main_question_aligned(q_order, turn.transcript)
-                                if not aligned and settings.REALTIME_STRICT_PROMPT_ENABLED:
-                                    planner = self._build_planner()
-                                    reask = TurnPlan(
-                                        turn_kind=TurnKind.REASK_PROMPT,
-                                        stage_after_completion=self.state.current_stage,
-                                        question_order_after_completion=q_order,
-                                        expected_reply_after_completion=turn.target_expected_reply or self.state.expected_candidate_reply_for,
-                                        control_instruction=(
-                                            "[INTERVIEW_STAGE] drift_correction\n"
-                                            f"[INSTRUCTION] 刚才跑题了。请重述主问题第{q_order}题："
-                                            f"{(planner.get_main_question(q_order) or {}).get('question_text', '').strip()}"
-                                        ),
-                                        advance_main_completed=False,
-                                        next_followups_used=self.state.followups_used_for_current,
-                                        next_clarifies_used=self.state.clarifies_used_for_current,
-                                    )
-                                    await self._send_response_create_with_turn(reask)
-                                    self.state.pending_plan = None
-                                    continue
-                            if self.state.pending_plan and self.orchestrator.should_advance_business_state(turn):
-                                transition = self.orchestrator.create_business_transition(self.state.pending_plan, turn)
-                                self._apply_business_transition(transition)
-                                self.state.pending_plan = None
-                            if turn.transcript:
-                                log_dialogue_line(interview_token=self.token, role="AI", text=turn.transcript)
-                                self._add_dialogue_turn("AI", turn.transcript)
-                    elif status == "cancelled":
-                        self.orchestrator.cancel_turn(response_id, status_details.get("reason", "unknown"))
-                        self.state.pending_plan = None
-                    elif status == "failed":
-                        error = status_details.get("error", {})
-                        self.orchestrator.fail_turn(response_id, error.get("code", "unknown"), error.get("message", ""))
-                        self.state.pending_plan = None
-                    continue
-
-                if event_type == "error":
-                    err = event.get("error", {}) or {}
+                if normalized.kind == "error":
+                    err = normalized.error or {}
                     if err.get("code") == "input_audio_buffer_commit_empty":
                         self.state.commit_pending = False
                         self.state.has_uncommitted_audio = False
+                    await self.websocket.send_text(json.dumps({"type": "error", "error": err}))
                     continue
 
-                if event_type == "input_audio_buffer.speech_started":
-                    self.audio_pipeline.on_speech_started(event.get("item_id"))
+                if normalized.kind == "input_committed":
+                    self.state.commit_pending = False
+                    self.state.has_uncommitted_audio = False
+                    committed_item_id = normalized.item_id
+                    if committed_item_id:
+                        self.state.last_committed_item_id = committed_item_id
+                        self.state.current_input_item_id = committed_item_id
+                    continue
+
+                if normalized.kind == "speech_started":
+                    item_id = self._ensure_item_id(normalized.item_id)
+                    self.audio_pipeline.on_speech_started(item_id)
                     log_interview_event(
-                        event_name="vad.speech_started",
+                        event_name="asr.speech_started",
                         interview_id=self.interview.id,
                         interview_token=self.token,
                         source="api.realtime",
                         stage=self.state.current_stage.value,
-                        details={"audio_start_ms": event.get("audio_start_ms", 0)},
+                        details={"audio_start_ms": normalized.audio_start_ms, "item_id": item_id},
                     )
                     continue
 
-                if event_type == "input_audio_buffer.speech_stopped":
-                    segment = self.audio_pipeline.on_speech_stopped(event.get("item_id"))
+                if normalized.kind == "speech_stopped":
+                    item_id = self._ensure_item_id(normalized.item_id)
+                    segment = self.audio_pipeline.on_speech_stopped(item_id)
                     log_interview_event(
-                        event_name="vad.speech_stopped",
+                        event_name="asr.speech_stopped",
                         interview_id=self.interview.id,
                         interview_token=self.token,
                         source="api.realtime",
                         stage=self.state.current_stage.value,
-                        details={"audio_end_ms": event.get("audio_end_ms", 0)},
+                        details={"audio_end_ms": normalized.audio_end_ms, "item_id": item_id},
                     )
                     if segment:
                         await self._finalize_candidate_segment(
@@ -558,19 +592,17 @@ class RealtimeSessionRunner:
                         )
                     continue
 
-                if event_type == "input_audio_buffer.committed":
-                    self.state.commit_pending = False
-                    self.state.has_uncommitted_audio = False
-                    committed_item_id = event.get("item_id")
-                    if committed_item_id:
-                        self.state.last_committed_item_id = committed_item_id
+                if normalized.kind == "transcript_completed":
+                    item_id = self._ensure_item_id(normalized.item_id)
+                    transcript = normalized.transcript
+                    if transcript:
+                        self.transcript_store.set_user_transcript(item_id, transcript)
+                        log_dialogue_line(interview_token=self.token, role="Candidate", text=transcript)
+                        self._add_dialogue_turn("Candidate", transcript)
                     continue
-
-                if event_type in ["response.completed", "conversation.item.created", "session.updated", "session.created"]:
-                    await self.websocket.send_text(json.dumps(event))
         except Exception as exc:
             log_interview_event(
-                event_name="relay.openai_to_client.error",
+                event_name="relay.asr_to_client.error",
                 interview_id=self.interview.id,
                 interview_token=self.token,
                 source="api.realtime",
@@ -579,8 +611,8 @@ class RealtimeSessionRunner:
                 error_message=str(exc),
             )
         finally:
-            if self.openai_ws and not self.openai_ws.closed:
-                await self.openai_ws.close()
+            if self.upstream_ws and not self.upstream_ws.closed:
+                await self.upstream_ws.close()
             self.usage_tracker.log_summary()
             log_interview_event(
                 event_name="orchestrator.stats",
